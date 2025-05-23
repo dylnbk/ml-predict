@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="preload">
+    <div class="container">
+        <div class="top-navigation">
+            <!-- Desktop tab controls -->
+            <div class="desktop-controls">
+                <div class="time-controls">
+                    <button class="time-btn active" data-interval="1h">1 Hour</button>
+                    <button class="time-btn" data-interval="4h">4 Hour</button>
+                    <button class="time-btn" data-interval="1d">1 Day</button>
+                </div>
+                
+                <div class="model-controls">
+                    <button class="model-btn active">GPT</button>
+                    <button class="model-btn">Gemini</button>
+                    <button class="model-btn">Claude</button>
+                </div>
+                
+                <div class="view-controls">
+                    <button class="view-btn active">Chart</button>
+                    <button class="view-btn">Table</button>
+                    <button class="view-btn">Sentiment</button>
+                </div>
+            </div>
+            
+            <!-- Mobile dropdown controls -->
+            <div class="mobile-controls">
+                <div class="dropdown-wrapper">
+                    <select class="dropdown time-dropdown" id="mobile-time-select">
+                        <option value="1h" selected>1 Hour</option>
+                        <option value="4h">4 Hour</option>
+                        <option value="1d">1 Day</option>
+                    </select>
+                </div>
+                
+                <div class="dropdown-wrapper">
+                    <select class="dropdown model-dropdown" id="mobile-model-select">
+                        <option value="gpt" selected>GPT</option>
+                        <option value="gemini">Gemini</option>
+                        <option value="claude">Claude</option>
+                    </select>
+                </div>
+                
+                <div class="dropdown-wrapper">
+                    <select class="dropdown view-dropdown" id="mobile-view-select">
+                        <option value="chart" selected>Chart</option>
+                        <option value="table">Table</option>
+                        <option value="sentiment">Sentiment</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Chart View -->
+        <div class="dashboard-grid view-content" id="chart-view">
+            <div class="crypto-card" data-symbol="BTC">
+                <div class="card-header">
+                    <div class="price-info">
+                        <span class="price">$0.00</span>
+                    </div>
+                    <div class="symbol">BTC</div>
+                </div>
+                <canvas class="chart" id="btc-chart"></canvas>
+            </div>
+            
+            <div class="crypto-card" data-symbol="ETH">
+                <div class="card-header">
+                    <div class="price-info">
+                        <span class="price">$0.00</span>
+                    </div>
+                    <div class="symbol">ETH</div>
+                </div>
+                <canvas class="chart" id="eth-chart"></canvas>
+            </div>
+            
+            <div class="crypto-card" data-symbol="XRP">
+                <div class="card-header">
+                    <div class="price-info">
+                        <span class="price">$0.00</span>
+                    </div>
+                    <div class="symbol">XRP</div>
+                </div>
+                <canvas class="chart" id="xrp-chart"></canvas>
+            </div>
+            
+            <div class="crypto-card" data-symbol="SOL">
+                <div class="card-header">
+                    <div class="price-info">
+                        <span class="price">$0.00</span>
+                    </div>
+                    <div class="symbol">SOL</div>
+                </div>
+                <canvas class="chart" id="sol-chart"></canvas>
+            </div>
+        </div>
+        
+        <!-- Table View -->
+        <div class="table-view view-content" id="table-view" style="display: none;">
+            <div class="table-grid">
+                <!-- BTC Table -->
+                <div class="crypto-card" data-symbol="BTC">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="btc-table-price">$0.00</span>
+                        </div>
+                        <div class="symbol">BTC</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="crypto-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Close</th>
+                                    <th>Prediction</th>
+                                    <th>Accuracy</th>
+                                </tr>
+                            </thead>
+                            <tbody id="btc-table-body">
+                                <!-- Table rows will be dynamically inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- ETH Table -->
+                <div class="crypto-card" data-symbol="ETH">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="eth-table-price">$0.00</span>
+                        </div>
+                        <div class="symbol">ETH</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="crypto-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Close</th>
+                                    <th>Prediction</th>
+                                    <th>Accuracy</th>
+                                </tr>
+                            </thead>
+                            <tbody id="eth-table-body">
+                                <!-- Table rows will be dynamically inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- XRP Table -->
+                <div class="crypto-card" data-symbol="XRP">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="xrp-table-price">$0.00</span>
+                        </div>
+                        <div class="symbol">XRP</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="crypto-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Close</th>
+                                    <th>Prediction</th>
+                                    <th>Accuracy</th>
+                                </tr>
+                            </thead>
+                            <tbody id="xrp-table-body">
+                                <!-- Table rows will be dynamically inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                
+                <!-- SOL Table -->
+                <div class="crypto-card" data-symbol="SOL">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="sol-table-price">$0.00</span>
+                        </div>
+                        <div class="symbol">SOL</div>
+                    </div>
+                    <div class="table-container">
+                        <table class="crypto-table">
+                            <thead>
+                                <tr>
+                                    <th>Date/Time</th>
+                                    <th>Close</th>
+                                    <th>Prediction</th>
+                                    <th>Accuracy</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sol-table-body">
+                                <!-- Table rows will be dynamically inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Fullscreen overlay and chart container -->
+    <div class="fullscreen-overlay" id="fullscreen-overlay"></div>
+    <div class="fullscreen-chart" id="fullscreen-chart">
+        <button class="close-btn" id="close-fullscreen" aria-label="Close fullscreen"></button>
+        <div class="fullscreen-header">
+            <div>
+                <span class="fullscreen-symbol" id="fullscreen-symbol">BTC</span>
+                <span class="fullscreen-price" id="fullscreen-price">$0.00</span>
+            </div>
+        </div>
+        <div class="fullscreen-chart-container">
+            <canvas id="fullscreen-canvas"></canvas>
+        </div>
+    </div>
+    
+    <!-- Fullscreen table overlay and container -->
+    <div class="fullscreen-overlay" id="fullscreen-table-overlay"></div>
+    <div class="fullscreen-table" id="fullscreen-table">
+        <button class="close-btn" id="close-fullscreen-table" aria-label="Close fullscreen table"></button>
+        <div class="fullscreen-header">
+            <div>
+                <span class="fullscreen-symbol" id="fullscreen-table-symbol">BTC</span>
+                <span class="fullscreen-price" id="fullscreen-table-price">$0.00</span>
+            </div>
+        </div>
+        <div class="fullscreen-table-container">
+            <table class="crypto-table fullscreen-crypto-table">
+                <thead>
+                    <tr>
+                        <th>Date/Time</th>
+                        <th>Close</th>
+                        <th>Prediction</th>
+                        <th>Accuracy</th>
+                    </tr>
+                </thead>
+                <tbody id="fullscreen-table-body">
+                    <!-- Table rows will be dynamically inserted here -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="app.js"></script>
+    <script>
+        // Remove preload class after page load to enable transitions
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                document.body.classList.remove('preload');
+            }, 100);
+        });
+    </script>
+</body>
+</html>
