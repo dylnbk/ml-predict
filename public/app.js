@@ -508,12 +508,15 @@ function switchView(viewName) {
     
     const chartView = document.getElementById('chart-view');
     const tableView = document.getElementById('table-view');
+    const sentimentView = document.getElementById('sentiment-view');
     
     // Fade out current view
     if (currentView === 'chart') {
         chartView.classList.add('fade-out');
     } else if (currentView === 'table') {
         tableView.classList.add('fade-out');
+    } else if (currentView === 'sentiment') {
+        sentimentView.classList.add('fade-out');
     }
     
     // Switch views after fade out
@@ -521,16 +524,26 @@ function switchView(viewName) {
         if (viewName === 'chart') {
             chartView.style.display = 'grid';
             tableView.style.display = 'none';
+            sentimentView.style.display = 'none';
             chartView.classList.remove('fade-out');
             chartView.classList.add('fade-in');
             setTimeout(() => chartView.classList.remove('fade-in'), 300);
         } else if (viewName === 'table') {
             tableView.style.display = 'block';
             chartView.style.display = 'none';
+            sentimentView.style.display = 'none';
             tableView.classList.remove('fade-out');
             tableView.classList.add('fade-in');
             updateTableView();
             setTimeout(() => tableView.classList.remove('fade-in'), 300);
+        } else if (viewName === 'sentiment') {
+            sentimentView.style.display = 'block';
+            chartView.style.display = 'none';
+            tableView.style.display = 'none';
+            sentimentView.classList.remove('fade-out');
+            sentimentView.classList.add('fade-in');
+            updateSentimentView();
+            setTimeout(() => sentimentView.classList.remove('fade-in'), 300);
         }
         
         currentView = viewName;
@@ -924,6 +937,152 @@ async function updateFullscreenChart(symbol, interval) {
     }
 }
 
+// Update sentiment view
+async function updateSentimentView() {
+    const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
+    
+    // Add loading state to all sentiment cards
+    document.querySelectorAll('#sentiment-view .crypto-card').forEach(card => {
+        card.classList.add('loading');
+    });
+    
+    // Fetch sentiment data for each symbol
+    await Promise.all(symbols.map(async (symbol) => {
+        try {
+            const response = await fetch(`/api/sentiment/${symbol}`);
+            const data = await response.json();
+            
+            // Update price
+            const priceElement = document.getElementById(`${symbol.toLowerCase()}-sentiment-price`);
+            if (priceElement && data.price) {
+                priceElement.textContent = `$${data.price.toFixed(data.price < 10 ? 4 : 2)}`;
+            }
+            
+            // Update sentiment rating
+            const ratingElement = document.getElementById(`${symbol.toLowerCase()}-sentiment-rating`);
+            if (ratingElement) {
+                ratingElement.textContent = data.sentiment.rating;
+                ratingElement.className = `sentiment-value ${data.sentiment.rating.toLowerCase()}`;
+            }
+            
+            // Update news summary
+            const newsElement = document.getElementById(`${symbol.toLowerCase()}-news-summary`);
+            if (newsElement) {
+                newsElement.textContent = data.news.summary;
+            }
+            
+            // Store full data for details view
+            const card = document.querySelector(`#sentiment-view .crypto-card[data-symbol="${symbol}"]`);
+            if (card) {
+                card.dataset.sentimentData = JSON.stringify(data);
+            }
+        } catch (error) {
+            console.error(`Error fetching sentiment for ${symbol}:`, error);
+        }
+    }));
+    
+    // Remove loading state
+    setTimeout(() => {
+        document.querySelectorAll('#sentiment-view .crypto-card').forEach(card => {
+            card.classList.remove('loading');
+        });
+    }, 300);
+}
+
+// Setup sentiment fullscreen feature
+function setupSentimentFullscreen() {
+    const overlay = document.getElementById('fullscreen-sentiment-overlay');
+    const fullscreenContainer = document.getElementById('fullscreen-sentiment');
+    const closeBtn = document.getElementById('close-fullscreen-sentiment');
+    
+    // Handle view details button clicks
+    document.addEventListener('click', (e) => {
+        if (e.target.classList.contains('view-details-btn')) {
+            const symbol = e.target.dataset.symbol;
+            const card = document.querySelector(`#sentiment-view .crypto-card[data-symbol="${symbol}"]`);
+            const data = JSON.parse(card.dataset.sentimentData || '{}');
+            
+            openFullscreenSentiment(symbol, data);
+        }
+    });
+    
+    // Simple markdown parser for basic formatting
+    function parseMarkdown(text) {
+        if (!text) return 'Loading news...';
+        
+        // Escape HTML to prevent XSS
+        let html = text.replace(/&/g, '&amp;')
+                      .replace(/</g, '&lt;')
+                      .replace(/>/g, '&gt;')
+                      .replace(/"/g, '&quot;')
+                      .replace(/'/g, '&#039;');
+        
+        // Parse bold text
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        
+        // Parse italic text
+        html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+        
+        // Parse links with target="_blank" for security
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+        
+        // Parse line breaks
+        html = html.replace(/\n/g, '<br>');
+        
+        // Parse paragraphs (double line breaks)
+        html = html.replace(/<br><br>/g, '</p><p>');
+        html = '<p>' + html + '</p>';
+        
+        return html;
+    }
+    
+    function openFullscreenSentiment(symbol, data) {
+        // Update fullscreen content
+        document.getElementById('fullscreen-sentiment-symbol').textContent = symbol;
+        document.getElementById('fullscreen-sentiment-price').textContent =
+            data.price ? `$${data.price.toFixed(data.price < 10 ? 4 : 2)}` : '$0.00';
+        
+        const ratingElement = document.getElementById('fullscreen-sentiment-rating');
+        ratingElement.textContent = data.sentiment?.rating || 'Loading...';
+        ratingElement.className = `sentiment-value-large ${(data.sentiment?.rating || '').toLowerCase()}`;
+        
+        const scoreElement = document.getElementById('fullscreen-sentiment-score');
+        if (data.sentiment?.score) {
+            scoreElement.textContent = `Score: ${data.sentiment.score}/100`;
+        } else {
+            scoreElement.textContent = '';
+        }
+        
+        const newsContent = document.getElementById('fullscreen-news-content');
+        // Use innerHTML with parsed markdown instead of textContent
+        newsContent.innerHTML = parseMarkdown(data.news?.content);
+        
+        // Show fullscreen
+        overlay.classList.add('active');
+        fullscreenContainer.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+    
+    function closeFullscreenSentiment() {
+        overlay.classList.remove('active');
+        fullscreenContainer.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+    
+    // Close button handler
+    closeBtn.addEventListener('click', closeFullscreenSentiment);
+    
+    // Overlay click handler
+    overlay.addEventListener('click', closeFullscreenSentiment);
+    
+    // Escape key handler
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && fullscreenContainer.classList.contains('active')) {
+            closeFullscreenSentiment();
+        }
+    });
+}
+
 // Auto-refresh every 60 seconds
 function startAutoRefresh() {
     setInterval(() => {
@@ -932,6 +1091,11 @@ function startAutoRefresh() {
         // Also update fullscreen chart if open
         if (currentFullscreenSymbol && fullscreenChart) {
             updateFullscreenChart(currentFullscreenSymbol, currentInterval);
+        }
+        
+        // Update sentiment view if active
+        if (currentView === 'sentiment') {
+            updateSentimentView();
         }
     }, 60000);
 }
@@ -943,6 +1107,7 @@ async function init() {
     setupModelControls();
     setupViewControls();
     setupFullscreenFeature();
+    setupSentimentFullscreen();
     await updateAllCharts(false); // No animation on initial load
     startAutoRefresh();
 }

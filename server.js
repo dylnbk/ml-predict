@@ -4,9 +4,41 @@ const axios = require('axios');
 const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
+const OpenAI = require('openai');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// News cache configuration
+const NEWS_CACHE_DURATION = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
+const newsCache = new Map(); // Cache structure: { symbol: { content, summary, timestamp } }
+
+// Helper function to check if cached news is still valid
+function isCacheValid(cacheEntry) {
+  if (!cacheEntry) return false;
+  const now = Date.now();
+  return (now - cacheEntry.timestamp) < NEWS_CACHE_DURATION;
+}
+
+// Helper function to clean old cache entries
+function cleanOldCacheEntries() {
+  const now = Date.now();
+  for (const [symbol, cacheEntry] of newsCache.entries()) {
+    if ((now - cacheEntry.timestamp) >= NEWS_CACHE_DURATION) {
+      newsCache.delete(symbol);
+      console.log(`🗑️ Cleaned old cache entry for ${symbol}`);
+    }
+  }
+}
+
+// Run cache cleanup every hour
+setInterval(cleanOldCacheEntries, 60 * 60 * 1000);
 
 // Middleware
 app.use(cors());
@@ -370,6 +402,146 @@ app.get('/api/latest-prices', (req, res) => {
     });
     res.json(prices);
   });
+});
+
+// Sentiment API endpoint
+app.get('/api/sentiment/:symbol', async (req, res) => {
+  const { symbol } = req.params;
+  
+  try {
+    // Fetch sentiment from Alternative.me Fear & Greed Index (for BTC)
+    // This API provides general crypto market sentiment
+    let sentimentData = null;
+    let sentimentRating = 'Neutral';
+    let sentimentScore = 50;
+    
+    try {
+      // Alternative.me API only provides general market sentiment (mainly BTC-based)
+      const fearGreedResponse = await axios.get('https://api.alternative.me/fng/?limit=1');
+      if (fearGreedResponse.data && fearGreedResponse.data.data && fearGreedResponse.data.data[0]) {
+        const fngData = fearGreedResponse.data.data[0];
+        sentimentScore = parseInt(fngData.value);
+        
+        // Convert Fear & Greed score to Bull/Bear/Neutral
+        if (sentimentScore >= 60) {
+          sentimentRating = 'Bull';
+        } else if (sentimentScore <= 40) {
+          sentimentRating = 'Bear';
+        } else {
+          sentimentRating = 'Neutral';
+        }
+        
+        sentimentData = {
+          score: sentimentScore,
+          classification: fngData.value_classification,
+          timestamp: fngData.timestamp
+        };
+      }
+    } catch (error) {
+      console.error('Error fetching sentiment data:', error.message);
+    }
+    
+    // Use OpenAI to get latest news/information
+    let newsContent = '';
+    let newsSummary = '';
+    let cacheHit = false;
+    
+    // Check cache first
+    const cachedNews = newsCache.get(symbol);
+    if (isCacheValid(cachedNews)) {
+      // Use cached data
+      newsContent = cachedNews.content;
+      newsSummary = cachedNews.summary;
+      cacheHit = true;
+      console.log(`📦 Cache hit for ${symbol} news (age: ${Math.round((Date.now() - cachedNews.timestamp) / 1000 / 60)} minutes)`);
+    } else {
+      // Fetch fresh data from OpenAI
+      if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key_here') {
+        try {
+          console.log(`🔄 Fetching fresh news for ${symbol} from OpenAI...`);
+          
+          const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini-search-preview-2025-03-11",
+            web_search_options: {
+              search_context_size: "high",
+            },
+            messages: [{
+              role: "user",
+              content: `Latest ${symbol} cryptocurrency news and market analysis. Provide a brief summary of the most recent developments, price movements, and market sentiment.`,
+            }],
+          });
+          
+          newsContent = completion.choices[0].message.content;
+          
+          // Create a shorter summary for the card display
+          const summaryCompletion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [{
+              role: "user",
+              content: `Summarize this in 2-3 sentences for a dashboard card: ${newsContent}`,
+            }],
+          });
+          
+          newsSummary = summaryCompletion.choices[0].message.content;
+          
+          // Store in cache
+          newsCache.set(symbol, {
+            content: newsContent,
+            summary: newsSummary,
+            timestamp: Date.now()
+          });
+          
+          console.log(`✅ Cached fresh news for ${symbol}`);
+        } catch (error) {
+          console.error('OpenAI API error:', error.message);
+          newsContent = `Unable to fetch latest news for ${symbol}. Please check your OpenAI API key.`;
+          newsSummary = 'News unavailable';
+        }
+      } else {
+        newsContent = `OpenAI API key not configured. Please add your API key to the .env file.`;
+        newsSummary = 'Configure API key for news';
+      }
+    }
+    
+    // Get current price from database
+    const priceData = await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT close as price, open_time
+         FROM kline_data
+         WHERE symbol = ? AND interval = '1h'
+         ORDER BY open_time DESC
+         LIMIT 1`,
+        [symbol],
+        (err, row) => {
+          if (err) reject(err);
+          else resolve(row);
+        }
+      );
+    });
+    
+    res.json({
+      symbol,
+      price: priceData ? priceData.price : 0,
+      sentiment: {
+        rating: sentimentRating,
+        score: sentimentScore,
+        data: sentimentData
+      },
+      news: {
+        content: newsContent,
+        summary: newsSummary,
+        timestamp: new Date().toISOString(),
+        cached: cacheHit
+      }
+    });
+    
+  } catch (error) {
+    console.error(`Error in sentiment endpoint for ${symbol}:`, error);
+    res.status(500).json({
+      error: 'Failed to fetch sentiment data',
+      message: error.message
+    });
+  }
 });
 
 // Initial data fetch on startup

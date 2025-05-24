@@ -205,6 +205,103 @@
                 </div>
             </div>
         </div>
+        
+        <!-- Sentiment View -->
+        <div class="sentiment-view view-content" id="sentiment-view" style="display: none;">
+            <div class="sentiment-grid">
+                <!-- BTC Sentiment -->
+                <div class="crypto-card sentiment-card" data-symbol="BTC">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="btc-sentiment-price">$0.00</span>
+                        </div>
+                        <div class="symbol">BTC</div>
+                    </div>
+                    <div class="sentiment-container">
+                        <div class="sentiment-rating">
+                            <span class="sentiment-label">Market Sentiment</span>
+                            <span class="sentiment-value" id="btc-sentiment-rating">Loading...</span>
+                        </div>
+                        <div class="sentiment-news">
+                            <h4>Latest News</h4>
+                            <p class="news-summary" id="btc-news-summary">Loading news...</p>
+                        </div>
+                        <div class="sentiment-footer">
+                            <button class="view-details-btn" data-symbol="BTC">View Details</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ETH Sentiment -->
+                <div class="crypto-card sentiment-card" data-symbol="ETH">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="eth-sentiment-price">$0.00</span>
+                        </div>
+                        <div class="symbol">ETH</div>
+                    </div>
+                    <div class="sentiment-container">
+                        <div class="sentiment-rating">
+                            <span class="sentiment-label">Market Sentiment</span>
+                            <span class="sentiment-value" id="eth-sentiment-rating">Loading...</span>
+                        </div>
+                        <div class="sentiment-news">
+                            <h4>Latest News</h4>
+                            <p class="news-summary" id="eth-news-summary">Loading news...</p>
+                        </div>
+                        <div class="sentiment-footer">
+                            <button class="view-details-btn" data-symbol="ETH">View Details</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- XRP Sentiment -->
+                <div class="crypto-card sentiment-card" data-symbol="XRP">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="xrp-sentiment-price">$0.00</span>
+                        </div>
+                        <div class="symbol">XRP</div>
+                    </div>
+                    <div class="sentiment-container">
+                        <div class="sentiment-rating">
+                            <span class="sentiment-label">Market Sentiment</span>
+                            <span class="sentiment-value" id="xrp-sentiment-rating">Loading...</span>
+                        </div>
+                        <div class="sentiment-news">
+                            <h4>Latest News</h4>
+                            <p class="news-summary" id="xrp-news-summary">Loading news...</p>
+                        </div>
+                        <div class="sentiment-footer">
+                            <button class="view-details-btn" data-symbol="XRP">View Details</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- SOL Sentiment -->
+                <div class="crypto-card sentiment-card" data-symbol="SOL">
+                    <div class="card-header">
+                        <div class="price-info">
+                            <span class="price" id="sol-sentiment-price">$0.00</span>
+                        </div>
+                        <div class="symbol">SOL</div>
+                    </div>
+                    <div class="sentiment-container">
+                        <div class="sentiment-rating">
+                            <span class="sentiment-label">Market Sentiment</span>
+                            <span class="sentiment-value" id="sol-sentiment-rating">Loading...</span>
+                        </div>
+                        <div class="sentiment-news">
+                            <h4>Latest News</h4>
+                            <p class="news-summary" id="sol-news-summary">Loading news...</p>
+                        </div>
+                        <div class="sentiment-footer">
+                            <button class="view-details-btn" data-symbol="SOL">View Details</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     
     <!-- Fullscreen overlay and chart container -->
@@ -246,6 +343,33 @@
                     <!-- Table rows will be dynamically inserted here -->
                 </tbody>
             </table>
+        </div>
+    </div>
+    
+    <!-- Fullscreen sentiment overlay and container -->
+    <div class="fullscreen-overlay" id="fullscreen-sentiment-overlay"></div>
+    <div class="fullscreen-sentiment" id="fullscreen-sentiment">
+        <button class="close-btn" id="close-fullscreen-sentiment" aria-label="Close fullscreen sentiment"></button>
+        <div class="fullscreen-header">
+            <div>
+                <span class="fullscreen-symbol" id="fullscreen-sentiment-symbol">BTC</span>
+                <span class="fullscreen-price" id="fullscreen-sentiment-price">$0.00</span>
+            </div>
+        </div>
+        <div class="fullscreen-sentiment-container">
+            <div class="fullscreen-sentiment-rating">
+                <h2>Market Sentiment</h2>
+                <div class="sentiment-display">
+                    <span class="sentiment-value-large" id="fullscreen-sentiment-rating">Loading...</span>
+                    <div class="sentiment-score" id="fullscreen-sentiment-score"></div>
+                </div>
+            </div>
+            <div class="fullscreen-news-container">
+                <h2>Latest News & Analysis</h2>
+                <div class="news-content" id="fullscreen-news-content">
+                    Loading news...
+                </div>
+            </div>
         </div>
     </div>
     
