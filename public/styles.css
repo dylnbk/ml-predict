@@ -4,6 +4,17 @@
     box-sizing: border-box;
 }
 
+/* Chart prediction styles */
+.chart-container {
+    position: relative;
+}
+
+/* Ensure chart.js respects our opacity settings */
+canvas {
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+
 /* Flash animations for price changes */
 @keyframes flash-green {
     0% { color: inherit; }
