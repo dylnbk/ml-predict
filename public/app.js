@@ -90,10 +90,13 @@ const chartOptions = {
 // Chart instances
 const charts = {};
 let currentInterval = '1h';
+let currentAIModel = 'GPT';
 let fullscreenChart = null;
 let currentFullscreenSymbol = null;
 let currentView = 'chart';
 let allCryptoData = {}; // Store data for all cryptocurrencies
+let allPredictions = {}; // Store predictions for all cryptocurrencies
+let allAccuracyMetrics = {}; // Store accuracy metrics for all cryptocurrencies
 
 // WebSocket connection
 let ws = null;
@@ -317,6 +320,42 @@ async function updateChart(symbol, interval, animate = true) {
     }
 }
 
+// Fetch predictions for a symbol/interval
+async function fetchPredictions(symbol, interval) {
+    try {
+        // Get the current AI provider (convert to lowercase)
+        const provider = currentAIModel.toLowerCase();
+        const response = await fetch(`/api/predictions/${symbol}/${interval}?provider=${provider}`);
+        if (response.ok) {
+            const predictions = await response.json();
+            // Store predictions indexed by symbol-interval-provider
+            const key = `${symbol}-${interval}-${provider}`;
+            allPredictions[key] = predictions;
+            return predictions;
+        }
+    } catch (error) {
+        console.error(`Error fetching predictions for ${symbol}/${interval} with ${currentAIModel}:`, error);
+    }
+    return [];
+}
+
+// Fetch accuracy metrics for a symbol/interval
+async function fetchAccuracyMetrics(symbol, interval) {
+    try {
+        const response = await fetch(`/api/predictions/accuracy/${symbol}/${interval}`);
+        if (response.ok) {
+            const metrics = await response.json();
+            // Store metrics indexed by symbol-interval
+            const key = `${symbol}-${interval}`;
+            allAccuracyMetrics[key] = metrics;
+            return metrics;
+        }
+    } catch (error) {
+        console.error(`Error fetching accuracy metrics for ${symbol}/${interval}:`, error);
+    }
+    return null;
+}
+
 // Update all charts with loading state
 async function updateAllCharts(animate = true) {
     const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
@@ -452,13 +491,20 @@ function setupModelControls() {
             buttons.forEach(btn => btn.classList.remove('active'));
             button.classList.add('active');
             
+            // Update current AI model
+            currentAIModel = button.textContent;
+            
             // Sync with mobile dropdown
             if (dropdown) {
                 const modelValue = button.textContent.toLowerCase();
                 dropdown.value = modelValue;
             }
             
-            // Model switching logic would go here
+            // Update table view if it's currently active
+            const tableView = document.getElementById('table-view');
+            if (tableView && tableView.style.display !== 'none') {
+                updateTableView();
+            }
         });
     });
     
@@ -472,10 +518,16 @@ function setupModelControls() {
                 btn.classList.remove('active');
                 if (btn.textContent.toLowerCase() === selectedModel) {
                     btn.classList.add('active');
+                    // Update current AI model
+                    currentAIModel = btn.textContent;
                 }
             });
             
-            // Model switching logic would go here
+            // Update table view if it's currently active
+            const tableView = document.getElementById('table-view');
+            if (tableView && tableView.style.display !== 'none') {
+                updateTableView();
+            }
         });
     }
 }
@@ -567,12 +619,16 @@ function switchView(viewName) {
 }
 
 // Update table view with data
-function updateTableView() {
+async function updateTableView() {
     const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
     
-    symbols.forEach(symbol => {
+    await Promise.all(symbols.map(async (symbol) => {
         const data = allCryptoData[symbol];
         if (!data || data.length === 0) return;
+        
+        // Fetch predictions and accuracy for this symbol
+        const predictions = await fetchPredictions(symbol, currentInterval);
+        const accuracyMetrics = await fetchAccuracyMetrics(symbol, currentInterval);
         
         // Update table price
         const prices = data.map(k => k.close);
@@ -588,26 +644,117 @@ function updateTableView() {
         
         tableBody.innerHTML = '';
         
-        // Show last 20 entries for each crypto (to fit in the view)
-        const recentData = data.slice(-20).reverse();
+        // Create a map of predictions by timestamp for easy lookup
+        const predictionMap = {};
+        if (predictions && predictions.length > 0) {
+            predictions.forEach(pred => {
+                predictionMap[pred.timestamp] = pred;
+            });
+        }
         
+        // Create a map to track processed timestamps to avoid duplicates
+        const processedTimestamps = new Set();
+        const allRows = [];
+        
+        // Add historical data (last 10 entries)
+        const recentData = data.slice(-10).reverse();
         recentData.forEach(kline => {
+            const timestamp = kline.open_time;
+            if (!processedTimestamps.has(timestamp)) {
+                processedTimestamps.add(timestamp);
+                const prediction = predictionMap[timestamp];
+                allRows.push({
+                    timestamp: timestamp,
+                    type: 'historical',
+                    closePrice: parseFloat(kline.close),
+                    prediction: prediction
+                });
+            }
+        });
+        
+        // Add future predictions (only those that don't have historical data)
+        const currentTime = Date.now();
+        const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+        
+        if (predictions && predictions.length > 0) {
+            predictions.forEach(pred => {
+                // Only add if it's a future prediction (no historical data exists for this timestamp)
+                if (!processedTimestamps.has(pred.timestamp) && pred.timestamp > lastHistoricalTime) {
+                    processedTimestamps.add(pred.timestamp);
+                    allRows.push({
+                        timestamp: pred.timestamp,
+                        type: 'future',
+                        closePrice: null,
+                        prediction: pred
+                    });
+                }
+            });
+        }
+        
+        // Sort by timestamp (newest first)
+        allRows.sort((a, b) => b.timestamp - a.timestamp);
+        
+        // Display up to 100 rows
+        const displayRows = allRows.slice(0, 100);
+        
+        displayRows.forEach(rowData => {
             const row = document.createElement('tr');
             
-            const date = new Date(kline.open_time);
+            const date = new Date(rowData.timestamp);
             const dateStr = formatTableDateTime(date, currentInterval);
-            const closePrice = parseFloat(kline.close);
+            
+            let closePriceHtml = '-';
+            let predictionHtml = '-';
+            let accuracyHtml = '-';
+            
+            if (rowData.type === 'historical') {
+                // Historical row with actual close price
+                closePriceHtml = `$${rowData.closePrice.toFixed(rowData.closePrice < 10 ? 4 : 2)}`;
+                
+                if (rowData.prediction) {
+                    // Show predicted price with AI indicator
+                    const predPrice = rowData.prediction.predicted_price;
+                    predictionHtml = `$${predPrice.toFixed(predPrice < 10 ? 4 : 2)} <span class="ai-indicator">${currentAIModel}</span>`;
+                    
+                    // Calculate accuracy based on the actual close price we have
+                    const accuracy = 100 - Math.abs((rowData.prediction.predicted_price - rowData.closePrice) / rowData.closePrice * 100);
+                    const accuracyClass = accuracy >= 95 ? 'accuracy-high' : accuracy >= 85 ? 'accuracy-medium' : 'accuracy-low';
+                    accuracyHtml = `<span class="${accuracyClass}">±${(100 - accuracy).toFixed(1)}%</span>`;
+                }
+            } else {
+                // Future prediction row
+                closePriceHtml = '-';
+                const predPrice = rowData.prediction.predicted_price;
+                predictionHtml = `$${predPrice.toFixed(predPrice < 10 ? 4 : 2)} <span class="ai-indicator">${currentAIModel}</span>`;
+                accuracyHtml = '-';
+            }
             
             row.innerHTML = `
                 <td>${dateStr}</td>
-                <td>$${closePrice.toFixed(closePrice < 10 ? 4 : 2)}</td>
-                <td>-</td>
-                <td>-</td>
+                <td>${closePriceHtml}</td>
+                <td>${predictionHtml}</td>
+                <td>${accuracyHtml}</td>
             `;
             
             tableBody.appendChild(row);
         });
-    });
+        
+        // Add overall accuracy at the bottom of the table
+        if (accuracyMetrics && accuracyMetrics.overall_accuracy !== undefined) {
+            const card = document.querySelector(`#table-view [data-symbol="${symbol}"]`);
+            let accuracyElement = card.querySelector('.overall-accuracy');
+            
+            if (!accuracyElement) {
+                accuracyElement = document.createElement('div');
+                accuracyElement.className = 'overall-accuracy';
+                card.querySelector('.crypto-table').appendChild(accuracyElement);
+            }
+            
+            const accuracy = accuracyMetrics.overall_accuracy;
+            const accuracyClass = accuracy >= 95 ? 'accuracy-high' : accuracy >= 85 ? 'accuracy-medium' : 'accuracy-low';
+            accuracyElement.innerHTML = `Model Accuracy: <span class="${accuracyClass}">${accuracy.toFixed(1)}%</span>`;
+        }
+    }));
 }
 
 // Format date/time for table view
@@ -788,34 +935,8 @@ function setupFullscreenFeature() {
         fullscreenTableContainer.classList.add('active');
         document.body.classList.add('fullscreen-active');
         
-        // Populate table with ALL data, latest first
-        if (allCryptoData[symbol]) {
-            const data = allCryptoData[symbol];
-            // Show ALL data, reversed to show latest first
-            const reversedData = [...data].reverse();
-            let tableHTML = '';
-            
-            reversedData.forEach(item => {
-                const date = new Date(item.open_time);
-                const dateStr = formatTableDateTime(date, currentInterval);
-                const closePrice = item.close.toFixed(item.close < 10 ? 4 : 2);
-                
-                // Generate mock prediction and accuracy
-                const prediction = (item.close * (1 + (Math.random() * 0.02 - 0.01))).toFixed(item.close < 10 ? 4 : 2);
-                const accuracy = (85 + Math.random() * 10).toFixed(1);
-                
-                tableHTML += `
-                    <tr>
-                        <td>${dateStr}</td>
-                        <td>$${closePrice}</td>
-                        <td>$${prediction}</td>
-                        <td>${accuracy}%</td>
-                    </tr>
-                `;
-            });
-            
-            fullscreenTableBody.innerHTML = tableHTML;
-        }
+        // Update table with predictions
+        updateFullscreenTable(symbol);
     }
     
     // Function to close fullscreen table
@@ -827,33 +948,120 @@ function setupFullscreenFeature() {
     }
     
     // Function to update fullscreen table data
-    function updateFullscreenTable(symbol) {
+    async function updateFullscreenTable(symbol) {
         if (allCryptoData[symbol]) {
             const data = allCryptoData[symbol];
-            // Show ALL data, reversed to show latest first
-            const reversedData = [...data].reverse();
+            
+            // Fetch predictions for fullscreen view
+            const predictions = await fetchPredictions(symbol, currentInterval);
+            const accuracyMetrics = await fetchAccuracyMetrics(symbol, currentInterval);
+            
+            // Create prediction map
+            const predictionMap = {};
+            if (predictions && predictions.length > 0) {
+                predictions.forEach(pred => {
+                    predictionMap[pred.timestamp] = pred;
+                });
+            }
+            
+            // Create a map to track processed timestamps to avoid duplicates
+            const processedTimestamps = new Set();
+            const allRows = [];
+            
+            // Add all historical data
+            data.forEach(item => {
+                const timestamp = item.open_time;
+                if (!processedTimestamps.has(timestamp)) {
+                    processedTimestamps.add(timestamp);
+                    const prediction = predictionMap[timestamp];
+                    allRows.push({
+                        timestamp: timestamp,
+                        type: 'historical',
+                        closePrice: parseFloat(item.close),
+                        prediction: prediction
+                    });
+                }
+            });
+            
+            // Add future predictions (only those that don't have historical data)
+            const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+            
+            if (predictions && predictions.length > 0) {
+                predictions.forEach(pred => {
+                    // Only add if it's a future prediction (no historical data exists for this timestamp)
+                    if (!processedTimestamps.has(pred.timestamp) && pred.timestamp > lastHistoricalTime) {
+                        processedTimestamps.add(pred.timestamp);
+                        allRows.push({
+                            timestamp: pred.timestamp,
+                            type: 'future',
+                            closePrice: null,
+                            prediction: pred
+                        });
+                    }
+                });
+            }
+            
+            // Sort by timestamp (newest first)
+            allRows.sort((a, b) => b.timestamp - a.timestamp);
+            
             let tableHTML = '';
             
-            reversedData.forEach(item => {
-                const date = new Date(item.open_time);
+            allRows.forEach(rowData => {
+                const date = new Date(rowData.timestamp);
                 const dateStr = formatTableDateTime(date, currentInterval);
-                const closePrice = item.close.toFixed(item.close < 10 ? 4 : 2);
                 
-                // Generate mock prediction and accuracy
-                const prediction = (item.close * (1 + (Math.random() * 0.02 - 0.01))).toFixed(item.close < 10 ? 4 : 2);
-                const accuracy = (85 + Math.random() * 10).toFixed(1);
+                let closePriceHtml = '-';
+                let predictionHtml = '-';
+                let accuracyHtml = '-';
+                
+                if (rowData.type === 'historical') {
+                    // Historical row with actual close price
+                    closePriceHtml = `$${rowData.closePrice.toFixed(rowData.closePrice < 10 ? 4 : 2)}`;
+                    
+                    if (rowData.prediction) {
+                        // Show predicted price with AI indicator
+                        const predPrice = rowData.prediction.predicted_price;
+                        predictionHtml = `$${predPrice.toFixed(predPrice < 10 ? 4 : 2)} <span class="ai-indicator">${currentAIModel}</span>`;
+                        
+                        // Calculate accuracy based on the actual close price we have
+                        const accuracy = 100 - Math.abs((rowData.prediction.predicted_price - rowData.closePrice) / rowData.closePrice * 100);
+                        const accuracyClass = accuracy >= 95 ? 'accuracy-high' : accuracy >= 85 ? 'accuracy-medium' : 'accuracy-low';
+                        accuracyHtml = `<span class="${accuracyClass}">±${(100 - accuracy).toFixed(1)}%</span>`;
+                    }
+                } else {
+                    // Future prediction row
+                    closePriceHtml = '-';
+                    const predPrice = rowData.prediction.predicted_price;
+                    predictionHtml = `$${predPrice.toFixed(predPrice < 10 ? 4 : 2)} <span class="ai-indicator">${currentAIModel}</span>`;
+                    accuracyHtml = '-';
+                }
                 
                 tableHTML += `
                     <tr>
                         <td>${dateStr}</td>
-                        <td>$${closePrice}</td>
-                        <td>$${prediction}</td>
-                        <td>${accuracy}%</td>
+                        <td>${closePriceHtml}</td>
+                        <td>${predictionHtml}</td>
+                        <td>${accuracyHtml}</td>
                     </tr>
                 `;
             });
             
             fullscreenTableBody.innerHTML = tableHTML;
+            
+            // Add overall accuracy at the bottom
+            if (accuracyMetrics && accuracyMetrics.overall_accuracy !== undefined) {
+                let accuracyElement = fullscreenTableContainer.querySelector('.overall-accuracy');
+                
+                if (!accuracyElement) {
+                    accuracyElement = document.createElement('div');
+                    accuracyElement.className = 'overall-accuracy fullscreen-accuracy';
+                    fullscreenTableContainer.querySelector('.fullscreen-table-container').appendChild(accuracyElement);
+                }
+                
+                const accuracy = accuracyMetrics.overall_accuracy;
+                const accuracyClass = accuracy >= 95 ? 'accuracy-high' : accuracy >= 85 ? 'accuracy-medium' : 'accuracy-low';
+                accuracyElement.innerHTML = `Model Accuracy: <span class="${accuracyClass}">${accuracy.toFixed(1)}%</span>`;
+            }
         }
     }
     
@@ -1331,6 +1539,25 @@ function startAutoRefresh() {
             updateSentimentView();
         }
     }, 60000);
+    
+    // Refresh predictions every 5 minutes
+    setInterval(async () => {
+        const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
+        await Promise.all(symbols.map(async (symbol) => {
+            await fetchPredictions(symbol, currentInterval);
+            await fetchAccuracyMetrics(symbol, currentInterval);
+        }));
+        
+        // Update table view if active
+        if (currentView === 'table') {
+            updateTableView();
+        }
+        
+        // Update fullscreen table if open
+        if (currentFullscreenSymbol && document.getElementById('fullscreen-table').classList.contains('active')) {
+            updateFullscreenTable(currentFullscreenSymbol);
+        }
+    }, 300000); // 5 minutes
 }
 
 // Initialize application

@@ -8,6 +8,8 @@ const fs = require('fs').promises;
 const OpenAI = require('openai');
 const WebSocket = require('ws');
 const http = require('http');
+const TechnicalIndicators = require('./utils/technicalIndicators');
+const PredictionService = require('./services/predictionService');
 require('dotenv').config();
 
 const app = express();
@@ -195,6 +197,60 @@ app.use(express.static('public'));
 
 // Database setup
 const db = new sqlite3.Database('./crypto_data.db');
+
+// Initialize technical indicators
+const technicalIndicators = new TechnicalIndicators('./crypto_data.db');
+
+// Initialize prediction service
+const predictionService = new PredictionService();
+
+// Run migrations on startup
+async function runMigrations() {
+  try {
+    // List of migration files to run in order
+    const migrations = [
+      'add_predictions_schema.sql',
+      'add_ai_provider_column.sql'
+    ];
+    
+    for (const migrationFile of migrations) {
+      const migrationPath = path.join(__dirname, 'migrations', migrationFile);
+      
+      // Check if migration file exists
+      try {
+        await fs.access(migrationPath);
+      } catch (error) {
+        console.log(`Migration file ${migrationFile} not found, skipping...`);
+        continue;
+      }
+      
+      const migrationSQL = await fs.readFile(migrationPath, 'utf8');
+      
+      await new Promise((resolve, reject) => {
+        db.exec(migrationSQL, (err) => {
+          if (err) {
+            // Check if it's a column already exists error
+            if (err.message.includes('duplicate column name: ai_provider')) {
+              console.log(`✅ Migration ${migrationFile} already applied`);
+              resolve();
+            } else {
+              console.error(`Error running migration ${migrationFile}:`, err);
+              reject(err);
+            }
+          } else {
+            console.log(`✅ Migration ${migrationFile} completed successfully`);
+            resolve();
+          }
+        });
+      });
+    }
+    
+    console.log('✅ All database migrations completed');
+  } catch (error) {
+    console.error('Error in migration process:', error);
+    throw error;
+  }
+}
 
 // Create tables if they don't exist
 db.serialize(() => {
@@ -482,6 +538,16 @@ async function fetchAndStoreKlines(symbol, interval) {
     const totalRecords = await getRecordCount(symbol, interval);
     console.log(`  Total records in database: ${totalRecords}`);
     
+    // Calculate technical indicators after storing new data
+    if (newKlines.length > 0) {
+      try {
+        await technicalIndicators.calculateAndStoreIndicators(symbol, interval);
+        console.log(`📈 Updated technical indicators for ${symbol} ${interval}`);
+      } catch (indicatorError) {
+        console.error(`⚠️ Error calculating indicators for ${symbol} ${interval}:`, indicatorError.message);
+      }
+    }
+    
   } catch (error) {
     console.error(`❌ Error processing ${symbol} ${interval}:`, error.message);
   }
@@ -602,6 +668,254 @@ app.get('/api/sentiment/:symbol', async (req, res) => {
   }
 });
 
+// Get latest technical indicators endpoint
+app.get('/api/indicators/:symbol/:interval', async (req, res) => {
+  const { symbol, interval } = req.params;
+  
+  try {
+    const indicators = await technicalIndicators.getLatestIndicators(symbol, interval);
+    
+    if (!indicators) {
+      return res.status(404).json({
+        error: 'No indicators available',
+        message: 'Technical indicators have not been calculated yet'
+      });
+    }
+    
+    res.json(indicators);
+  } catch (error) {
+    console.error(`Error fetching indicators for ${symbol} ${interval}:`, error);
+    res.status(500).json({
+      error: 'Failed to fetch technical indicators',
+      message: error.message
+    });
+  }
+});
+
+// Prediction API endpoints
+
+// Get current predictions for a symbol/interval
+app.get('/api/predictions/:symbol/:interval', async (req, res) => {
+  const { symbol, interval } = req.params;
+  const { provider = 'gemini' } = req.query; // Get AI provider from query param
+  
+  try {
+    // Use predictionService to get predictions for specific provider
+    const predictions = await predictionService.getPredictions(symbol, interval, provider);
+    
+    if (!predictions || predictions.length === 0) {
+      return res.status(404).json({
+        error: 'No predictions available',
+        message: `No predictions found for ${symbol} ${interval} using ${provider}`
+      });
+    }
+    
+    // Return predictions in the format expected by frontend
+    res.json(predictions);
+    
+  } catch (error) {
+    console.error(`Error fetching predictions for ${symbol} ${interval} with ${provider}:`, error);
+    res.status(500).json({
+      error: 'Failed to fetch predictions',
+      message: error.message
+    });
+  }
+});
+
+// Get accuracy metrics for a symbol/interval
+app.get('/api/predictions/accuracy/:symbol/:interval', async (req, res) => {
+  const { symbol, interval } = req.params;
+  
+  try {
+    // Use predictionService to get accuracy metrics
+    const metrics = await predictionService.getAccuracyMetrics(symbol, interval);
+    
+    if (!metrics) {
+      return res.status(404).json({
+        error: 'No accuracy data available',
+        message: 'No completed predictions found for accuracy calculation'
+      });
+    }
+    
+    // Return metrics in the format expected by frontend
+    res.json(metrics);
+    
+  } catch (error) {
+    console.error(`Error fetching accuracy metrics for ${symbol} ${interval}:`, error);
+    res.status(500).json({
+      error: 'Failed to fetch accuracy metrics',
+      message: error.message
+    });
+  }
+});
+
+// Manually trigger prediction generation (for testing)
+app.post('/api/predictions/generate', async (req, res) => {
+  const { symbol, interval } = req.body;
+  
+  // Validate input
+  if (!symbol || !SYMBOLS.includes(symbol)) {
+    return res.status(400).json({
+      error: 'Invalid symbol',
+      message: 'Symbol must be one of: ' + SYMBOLS.join(', ')
+    });
+  }
+  
+  if (!interval || !Object.values(INTERVALS).includes(interval)) {
+    return res.status(400).json({
+      error: 'Invalid interval',
+      message: 'Interval must be one of: ' + Object.values(INTERVALS).join(', ')
+    });
+  }
+  
+  try {
+    console.log(`📮 Manual prediction generation requested for ${symbol} ${interval}`);
+    
+    const result = await predictionService.generatePredictions(symbol, interval);
+    
+    if (!result.success) {
+      return res.status(500).json({
+        error: 'Prediction generation failed',
+        message: result.error
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: `Generated ${result.predictions.length} predictions for ${symbol} ${interval}`,
+      result
+    });
+    
+  } catch (error) {
+    console.error('Error in manual prediction generation:', error);
+    res.status(500).json({
+      error: 'Failed to generate predictions',
+      message: error.message
+    });
+  }
+});
+
+// Helper function to get latest indicators for predictions
+async function getLatestIndicatorsForPrediction(symbol, interval) {
+  try {
+    const indicators = await technicalIndicators.getLatestIndicators(symbol, interval);
+    return indicators;
+  } catch (error) {
+    console.error(`Error getting indicators for prediction ${symbol} ${interval}:`, error);
+    return null;
+  }
+}
+
+// Scheduled task to generate hourly predictions
+async function generateHourlyPredictions() {
+  console.log('\n⏰ Running scheduled hourly prediction generation...');
+  
+  const providers = ['gemini', 'gpt', 'claude'];
+  
+  for (const symbol of SYMBOLS) {
+    for (const provider of providers) {
+      try {
+        const result = await predictionService.generatePredictions(symbol, '1h', provider);
+        if (result.success) {
+          console.log(`✅ Generated hourly predictions for ${symbol} using ${provider}`);
+        } else {
+          console.error(`❌ Failed to generate hourly predictions for ${symbol} using ${provider}: ${result.error}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error generating hourly predictions for ${symbol} using ${provider}:`, error.message);
+      }
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    // Delay between symbols
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  console.log('✅ Hourly prediction generation completed\n');
+}
+
+// Scheduled task to generate 4-hourly predictions
+async function generate4HourlyPredictions() {
+  console.log('\n⏰ Running scheduled 4-hourly prediction generation...');
+  
+  const providers = ['gemini', 'gpt', 'claude'];
+  
+  for (const symbol of SYMBOLS) {
+    for (const provider of providers) {
+      try {
+        const result = await predictionService.generatePredictions(symbol, '4h', provider);
+        if (result.success) {
+          console.log(`✅ Generated 4-hourly predictions for ${symbol} using ${provider}`);
+        } else {
+          console.error(`❌ Failed to generate 4-hourly predictions for ${symbol} using ${provider}: ${result.error}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error generating 4-hourly predictions for ${symbol} using ${provider}:`, error.message);
+      }
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    // Delay between symbols
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  console.log('✅ 4-hourly prediction generation completed\n');
+}
+
+// Scheduled task to generate daily predictions
+async function generateDailyPredictions() {
+  console.log('\n⏰ Running scheduled daily prediction generation...');
+  
+  const providers = ['gemini', 'gpt', 'claude'];
+  
+  for (const symbol of SYMBOLS) {
+    for (const provider of providers) {
+      try {
+        const result = await predictionService.generatePredictions(symbol, '1d', provider);
+        if (result.success) {
+          console.log(`✅ Generated daily predictions for ${symbol} using ${provider}`);
+        } else {
+          console.error(`❌ Failed to generate daily predictions for ${symbol} using ${provider}: ${result.error}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error generating daily predictions for ${symbol} using ${provider}:`, error.message);
+      }
+      
+      // Small delay between requests
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    // Delay between symbols
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  console.log('✅ Daily prediction generation completed\n');
+}
+
+// Scheduled task to update actual prices and calculate accuracy
+async function updatePredictionAccuracy() {
+  console.log('\n📊 Running scheduled prediction accuracy update...');
+  
+  for (const symbol of SYMBOLS) {
+    for (const interval of Object.values(INTERVALS)) {
+      try {
+        const result = await predictionService.updateActualPrices(symbol, interval);
+        if (result.updated > 0) {
+          console.log(`✅ Updated ${result.updated} predictions for ${symbol} ${interval}`);
+        }
+      } catch (error) {
+        console.error(`❌ Error updating predictions for ${symbol} ${interval}:`, error.message);
+      }
+    }
+  }
+  
+  console.log('✅ Prediction accuracy update completed\n');
+}
+
 // Initial data fetch on startup
 fetchAllData();
 
@@ -626,6 +940,35 @@ cron.schedule('0 * * * *', () => {
 cron.schedule('0 */4 * * *', () => {
   console.log('\n⏰ Running scheduled sentiment data update...');
   fetchAllSentimentData();
+});
+
+// Schedule prediction generation tasks
+// Hourly predictions: Run at 1 minute past each hour
+cron.schedule('1 * * * *', () => {
+  generateHourlyPredictions().catch(error => {
+    console.error('Fatal error in hourly prediction generation:', error);
+  });
+});
+
+// 4-hourly predictions: Run at 1 minute past every 4 hours
+cron.schedule('1 */4 * * *', () => {
+  generate4HourlyPredictions().catch(error => {
+    console.error('Fatal error in 4-hourly prediction generation:', error);
+  });
+});
+
+// Daily predictions: Run at 00:01 UTC
+cron.schedule('1 0 * * *', () => {
+  generateDailyPredictions().catch(error => {
+    console.error('Fatal error in daily prediction generation:', error);
+  });
+});
+
+// Update actual prices and calculate accuracy every 5 minutes
+cron.schedule('*/5 * * * *', () => {
+  updatePredictionAccuracy().catch(error => {
+    console.error('Fatal error in prediction accuracy update:', error);
+  });
 });
 
 // WebSocket connection to Binance
@@ -775,9 +1118,48 @@ async function initializePrices() {
 server.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
   
+  // Run database migrations
+  try {
+    await runMigrations();
+  } catch (error) {
+    console.error('Failed to run migrations:', error);
+  }
+  
   // Initialize prices from database
   await initializePrices();
   
   // Connect to Binance WebSocket
   connectToBinance();
+  
+  // Calculate initial technical indicators for all existing data
+  setTimeout(async () => {
+    await technicalIndicators.calculateAllIndicators(SYMBOLS, Object.values(INTERVALS));
+  }, 5000); // Wait 5 seconds for initial data fetch to complete
+  
+  // Generate initial predictions for all timeframes after a delay to ensure data is ready
+  setTimeout(async () => {
+    console.log('\n🚀 Generating initial predictions for all timeframes...');
+    
+    // Generate hourly predictions
+    await generateHourlyPredictions().catch(error => {
+      console.error('Error generating initial hourly predictions:', error);
+    });
+    
+    // Generate 4-hourly predictions
+    await generate4HourlyPredictions().catch(error => {
+      console.error('Error generating initial 4-hourly predictions:', error);
+    });
+    
+    // Generate daily predictions
+    await generateDailyPredictions().catch(error => {
+      console.error('Error generating initial daily predictions:', error);
+    });
+    
+    console.log('✅ Initial predictions generation completed\n');
+  }, 10000); // Wait 10 seconds for data and indicators to be ready
 });
+
+// Export helper function for use in other modules
+module.exports = {
+  getLatestIndicatorsForPrediction
+};

@@ -1427,3 +1427,79 @@ body.fullscreen-active {
         padding: 8px 24px;
     }
 }
+
+/* AI Prediction Styles */
+.ai-indicator {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    color: #00CED1;
+    background: rgba(0, 206, 209, 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 4px;
+    vertical-align: middle;
+    letter-spacing: 0.5px;
+    border: 1px solid rgba(0, 206, 209, 0.3);
+}
+
+/* Accuracy Score Styles */
+.accuracy-high {
+    color: #00FF88;
+    font-weight: 600;
+}
+
+.accuracy-medium {
+    color: #FFD700;
+    font-weight: 600;
+}
+
+.accuracy-low {
+    color: #FF4757;
+    font-weight: 600;
+}
+
+/* Overall Accuracy Display */
+.overall-accuracy {
+    margin-top: 15px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.overall-accuracy span {
+    margin-left: 5px;
+}
+
+/* Fullscreen accuracy display */
+.fullscreen-accuracy {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    padding: 12px 24px;
+    border-radius: 10px;
+    font-size: 14px;
+    z-index: 10;
+}
+
+/* Update table prediction column styling */
+.crypto-table td:nth-child(3) {
+    color: rgba(255, 255, 255, 0.85);
+    font-style: normal;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+}
+
+/* Update table accuracy column styling */
+.crypto-table td:nth-child(4) {
+    color: rgba(255, 255, 255, 0.85);
+    font-style: normal;
+    text-align: center;
+}
