@@ -27,7 +27,18 @@ const chartOptions = {
             displayColors: false,
             callbacks: {
                 label: function(context) {
-                    return `$${context.parsed.y.toFixed(2)}`;
+                    let datasetLabel = context.dataset.label || '';
+                    const value = context.parsed.y;
+                    const numericValue = (typeof value === 'number' && !isNaN(value)) ? value : 0;
+                    const formattedValue = '$' + numericValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                    if (datasetLabel.endsWith(' Past Predictions')) {
+                        return `Past Pred: ${formattedValue}`;
+                    } else if (datasetLabel.endsWith(' Future Predictions')) {
+                        return `Future Pred: ${formattedValue}`;
+                    } else { // Actual data series (e.g., 'BTC', 'ETH')
+                        return `Actual: ${formattedValue}`;
+                    }
                 }
             }
         },
@@ -626,65 +637,190 @@ function setupTimeControls() {
 
 // Setup model controls
 function setupModelControls() {
-    const buttons = document.querySelectorAll('.model-btn');
-    const dropdown = document.getElementById('mobile-model-select');
-    
-    buttons.forEach(button => {
-        button.addEventListener('click', () => {
-            // Update active state
-            buttons.forEach(btn => btn.classList.remove('active'));
-            button.classList.add('active');
+    const customDropdown = document.getElementById('desktop-model-select-custom');
+    const mobileModelSelect = document.getElementById('mobile-model-select'); // Keep for mobile
+
+    const handleModelChange = (selectedValue) => {
+        const newModel = selectedValue.toUpperCase(); // GPT, GEMINI, CLAUDE
+        if (currentAIModel !== newModel) {
+            currentAIModel = newModel;
+            console.log(`AI Model changed to: ${currentAIModel}`);
             
-            // Update current AI model
-            currentAIModel = button.textContent;
-            
-            // Sync with mobile dropdown
-            if (dropdown) {
-                const modelValue = button.textContent.toLowerCase();
-                dropdown.value = modelValue;
-            }
-            
-            // Update charts with new model predictions
-            if (currentView === 'chart') {
-                updateAllCharts(true);
-            } else if (currentView === 'table') {
+            updateAllCharts(true);
+            if (currentView === 'table') {
                 updateTableView();
             }
-            
-            // Update fullscreen chart if it's open
             if (fullscreenChart && currentFullscreenSymbol) {
                 updateFullscreenChart(currentFullscreenSymbol, currentInterval);
             }
+            const fullscreenTable = document.getElementById('fullscreen-table');
+            if (fullscreenTable.style.display === 'flex' && currentFullscreenSymbol) {
+                updateFullscreenTable(currentFullscreenSymbol);
+            }
+        }
+    };
+
+    if (customDropdown) {
+        const selectedDisplay = customDropdown.querySelector('.custom-dropdown-selected');
+        const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+        const optionsList = customDropdown.querySelector('.custom-dropdown-options');
+        const options = Array.from(customDropdown.querySelectorAll('.custom-dropdown-option'));
+
+        // Set initial selected text based on HTML
+        const initialSelectedOption = options.find(opt => opt.classList.contains('selected'));
+        if (initialSelectedOption) {
+            selectedTextElement.textContent = initialSelectedOption.textContent;
+            // currentAIModel = initialSelectedOption.dataset.value.toUpperCase(); // Set initial model
+        } else if (options.length > 0) { // Fallback to first option if none selected
+            options[0].classList.add('selected');
+            selectedTextElement.textContent = options[0].textContent;
+            // currentAIModel = options[0].dataset.value.toUpperCase();
+        }
+
+
+        selectedDisplay.addEventListener('click', (event) => {
+            event.stopPropagation();
+            customDropdown.classList.toggle('open');
+            optionsList.style.display = customDropdown.classList.contains('open') ? 'block' : 'none';
         });
-    });
-    
-    // Mobile dropdown change handler
-    if (dropdown) {
-        dropdown.addEventListener('change', (e) => {
-            const selectedModel = e.target.value;
-            
-            // Update desktop buttons to match
-            buttons.forEach(btn => {
-                btn.classList.remove('active');
-                if (btn.textContent.toLowerCase() === selectedModel) {
-                    btn.classList.add('active');
-                    // Update current AI model
-                    currentAIModel = btn.textContent;
+        
+        customDropdown.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                customDropdown.classList.toggle('open');
+                optionsList.style.display = customDropdown.classList.contains('open') ? 'block' : 'none';
+                 if(customDropdown.classList.contains('open')) {
+                    options.find(o => o.classList.contains('selected') || o)?.focus();
+                 }
+            } else if (event.key === 'Escape' && customDropdown.classList.contains('open')) {
+                customDropdown.classList.remove('open');
+                optionsList.style.display = 'none';
+                selectedDisplay.focus();
+            } else if (customDropdown.classList.contains('open') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                event.preventDefault();
+                let currentIndex = options.findIndex(opt => opt === document.activeElement);
+                if (currentIndex === -1) { // If no option is focused, focus the selected one or the first one
+                    currentIndex = options.findIndex(opt => opt.classList.contains('selected'));
+                    if (currentIndex === -1) currentIndex = -1; // Will become 0 after +1 for ArrowDown
+                }
+
+                if (event.key === 'ArrowDown') {
+                    currentIndex = (currentIndex + 1) % options.length;
+                } else { // ArrowUp
+                    currentIndex = (currentIndex - 1 + options.length) % options.length;
+                }
+                options[currentIndex].focus();
+            }
+        });
+
+        options.forEach(option => {
+            option.setAttribute('tabindex', '0'); // Make options focusable
+            option.addEventListener('click', function() {
+                selectOption(this);
+            });
+            option.addEventListener('keydown', function(event) {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    selectOption(this);
                 }
             });
+        });
+        
+        function selectOption(optionElement) {
+            const selectedValue = optionElement.dataset.value;
+            selectedTextElement.textContent = optionElement.textContent;
             
-            // Update charts with new model predictions
-            if (currentView === 'chart') {
-                updateAllCharts(true);
-            } else if (currentView === 'table') {
-                updateTableView();
+            options.forEach(opt => opt.classList.remove('selected'));
+            optionElement.classList.add('selected');
+
+            customDropdown.classList.remove('open');
+            optionsList.style.display = 'none';
+            selectedDisplay.focus(); // Return focus to the main dropdown element
+
+            handleModelChange(selectedValue);
+
+            if (mobileModelSelect && mobileModelSelect.value !== selectedValue) {
+                mobileModelSelect.value = selectedValue;
             }
-            
-            // Update fullscreen chart if it's open
-            if (fullscreenChart && currentFullscreenSymbol) {
-                updateFullscreenChart(currentFullscreenSymbol, currentInterval);
+        }
+
+        document.addEventListener('click', (event) => {
+            if (!customDropdown.contains(event.target) && customDropdown.classList.contains('open')) {
+                customDropdown.classList.remove('open');
+                optionsList.style.display = 'none';
             }
         });
+        
+        // Set initial model from custom dropdown's default selected
+        const initiallySelected = options.find(opt => opt.classList.contains('selected'));
+        if (initiallySelected && !currentAIModel) { // Only set if not already set (e.g. by mobile)
+             currentAIModel = initiallySelected.dataset.value.toUpperCase();
+        } else if (options.length > 0 && !currentAIModel) {
+             currentAIModel = options[0].dataset.value.toUpperCase(); // Fallback
+        }
+
+    }
+
+    if (mobileModelSelect) {
+        mobileModelSelect.addEventListener('change', (event) => {
+            const selectedValue = event.target.value;
+            handleModelChange(selectedValue);
+            if (customDropdown) {
+                const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+                const options = customDropdown.querySelectorAll('.custom-dropdown-option');
+                let found = false;
+                options.forEach(opt => {
+                    if (opt.dataset.value === selectedValue) {
+                        selectedTextElement.textContent = opt.textContent;
+                        opt.classList.add('selected');
+                        found = true;
+                    } else {
+                        opt.classList.remove('selected');
+                    }
+                });
+                 if (!found && options.length > 0) { // Fallback if value not in custom
+                    selectedTextElement.textContent = options[0].textContent;
+                    options[0].classList.add('selected');
+                 }
+            }
+        });
+        // Sync initial state if mobile has a value and custom dropdown doesn't match or isn't set
+        if (mobileModelSelect.value && customDropdown) {
+            const customSelectedValue = customDropdown.querySelector('.custom-dropdown-option.selected')?.dataset.value;
+            if (customSelectedValue !== mobileModelSelect.value) {
+                 const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+                 const options = customDropdown.querySelectorAll('.custom-dropdown-option');
+                 let found = false;
+                 options.forEach(opt => {
+                    if (opt.dataset.value === mobileModelSelect.value) {
+                        selectedTextElement.textContent = opt.textContent;
+                        opt.classList.add('selected');
+                        found = true;
+                    } else {
+                        opt.classList.remove('selected');
+                    }
+                 });
+                 if (!found && options.length > 0) { // Fallback
+                    selectedTextElement.textContent = options[0].textContent;
+                    options[0].classList.add('selected');
+                 }
+                 currentAIModel = mobileModelSelect.value.toUpperCase();
+            }
+        } else if (mobileModelSelect.value && !currentAIModel) {
+            currentAIModel = mobileModelSelect.value.toUpperCase();
+        }
+    }
+     // Final check for initial currentAIModel if it's still default 'GPT' but HTML has other selected
+    if (currentAIModel === 'GPT') {
+        const desktopInitial = document.querySelector('#desktop-model-select-custom .custom-dropdown-option.selected');
+        if (desktopInitial && desktopInitial.dataset.value.toUpperCase() !== 'GPT') {
+            currentAIModel = desktopInitial.dataset.value.toUpperCase();
+        } else {
+            const mobileInitial = document.getElementById('mobile-model-select');
+            if (mobileInitial && mobileInitial.value.toUpperCase() !== 'GPT') {
+                 currentAIModel = mobileInitial.value.toUpperCase();
+            }
+        }
     }
 }
 
