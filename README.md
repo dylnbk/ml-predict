@@ -62,6 +62,14 @@ The new Sentiment tab provides:
 - **Latest News**: AI-powered news summaries using OpenAI's web search model
 - **View Details**: Click to see full news content and detailed analysis
 
+### File-Based Sentiment System
+
+The sentiment data is now stored in a file-based system with scheduled updates:
+- **Data Storage**: All sentiment data is stored in `sentiment-data.json`
+- **Update Schedule**: Data is automatically fetched every 4 hours
+- **Persistence**: Data persists across server restarts
+- **Efficiency**: All users receive the same cached data, reducing API calls
+
 ### API Requirements
 
 - **OpenAI API**: Required for news summaries. Get your API key from [OpenAI Platform](https://platform.openai.com/)
@@ -69,7 +77,9 @@ The new Sentiment tab provides:
 
 ## Automatic Updates
 
-The application automatically fetches new data every hour using node-cron scheduler.
+The application uses scheduled tasks for data updates:
+- **Kline Data**: Fetched every hour for price charts
+- **Sentiment Data**: Fetched every 4 hours and stored in `sentiment-data.json`
 
 ## Development
 

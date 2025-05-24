@@ -4,41 +4,189 @@ const axios = require('axios');
 const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
+const fs = require('fs').promises;
 const OpenAI = require('openai');
+const WebSocket = require('ws');
+const http = require('http');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+
+// Store previous prices for calculating changes
+const previousPrices = {
+  BTC: null,
+  ETH: null,
+  XRP: null,
+  SOL: null
+};
+
+// Store current prices
+const currentPrices = {
+  BTC: null,
+  ETH: null,
+  XRP: null,
+  SOL: null
+};
 
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// News cache configuration
-const NEWS_CACHE_DURATION = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
-const newsCache = new Map(); // Cache structure: { symbol: { content, summary, timestamp } }
+// File-based sentiment data configuration
+const SENTIMENT_DATA_FILE = path.join(__dirname, 'sentiment-data.json');
+const SENTIMENT_UPDATE_INTERVAL = 4 * 60 * 60 * 1000; // 4 hours in milliseconds
 
-// Helper function to check if cached news is still valid
-function isCacheValid(cacheEntry) {
-  if (!cacheEntry) return false;
-  const now = Date.now();
-  return (now - cacheEntry.timestamp) < NEWS_CACHE_DURATION;
-}
+// Cryptocurrency symbols
+const SYMBOLS = ['BTC', 'ETH', 'XRP', 'SOL'];
 
-// Helper function to clean old cache entries
-function cleanOldCacheEntries() {
-  const now = Date.now();
-  for (const [symbol, cacheEntry] of newsCache.entries()) {
-    if ((now - cacheEntry.timestamp) >= NEWS_CACHE_DURATION) {
-      newsCache.delete(symbol);
-      console.log(`🗑️ Cleaned old cache entry for ${symbol}`);
-    }
+// Helper function to check if sentiment data needs update
+async function needsSentimentUpdate() {
+  try {
+    const data = await fs.readFile(SENTIMENT_DATA_FILE, 'utf8');
+    const sentimentData = JSON.parse(data);
+    const lastUpdate = new Date(sentimentData.lastUpdate).getTime();
+    const now = Date.now();
+    return (now - lastUpdate) >= SENTIMENT_UPDATE_INTERVAL;
+  } catch (error) {
+    // File doesn't exist or is invalid
+    return true;
   }
 }
 
-// Run cache cleanup every hour
-setInterval(cleanOldCacheEntries, 60 * 60 * 1000);
+// Helper function to read sentiment data from file
+async function readSentimentData() {
+  try {
+    const data = await fs.readFile(SENTIMENT_DATA_FILE, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    console.error('Error reading sentiment data file:', error.message);
+    return null;
+  }
+}
+
+// Helper function to write sentiment data to file
+async function writeSentimentData(data) {
+  try {
+    await fs.writeFile(SENTIMENT_DATA_FILE, JSON.stringify(data, null, 2));
+    console.log('✅ Sentiment data saved to file');
+  } catch (error) {
+    console.error('Error writing sentiment data file:', error.message);
+  }
+}
+
+// Function to fetch sentiment data for all cryptocurrencies
+async function fetchAllSentimentData() {
+  console.log('\n🔄 Fetching sentiment data for all cryptocurrencies...');
+  
+  const sentimentData = {
+    lastUpdate: new Date().toISOString(),
+    data: {}
+  };
+
+  // Fetch general market sentiment from Fear & Greed Index
+  let marketSentiment = null;
+  try {
+    const fearGreedResponse = await axios.get('https://api.alternative.me/fng/?limit=1');
+    if (fearGreedResponse.data && fearGreedResponse.data.data && fearGreedResponse.data.data[0]) {
+      const fngData = fearGreedResponse.data.data[0];
+      marketSentiment = {
+        score: parseInt(fngData.value),
+        classification: fngData.value_classification,
+        timestamp: fngData.timestamp
+      };
+    }
+  } catch (error) {
+    console.error('Error fetching Fear & Greed Index:', error.message);
+  }
+
+  // Fetch news and sentiment for each cryptocurrency
+  for (const symbol of SYMBOLS) {
+    console.log(`📊 Fetching data for ${symbol}...`);
+    
+    let newsContent = '';
+    let newsSummary = '';
+    let sentimentRating = 'Neutral';
+    let sentimentScore = 50;
+
+    // Apply market sentiment
+    if (marketSentiment) {
+      sentimentScore = marketSentiment.score;
+      if (sentimentScore >= 60) {
+        sentimentRating = 'Bull';
+      } else if (sentimentScore <= 40) {
+        sentimentRating = 'Bear';
+      } else {
+        sentimentRating = 'Neutral';
+      }
+    }
+
+    // Fetch news using OpenAI
+    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key_here') {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini-search-preview-2025-03-11",
+          web_search_options: {
+            search_context_size: "high",
+          },
+          messages: [{
+            role: "user",
+            content: `Latest ${symbol} cryptocurrency news and market analysis. Provide a brief summary of the most recent developments, price movements, and market sentiment.`,
+          }],
+        });
+        
+        newsContent = completion.choices[0].message.content;
+        
+        // Create a shorter summary for the card display
+        const summaryCompletion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{
+            role: "user",
+            content: `Summarize this in 2-3 sentences for a dashboard card: ${newsContent}`,
+          }],
+        });
+        
+        newsSummary = summaryCompletion.choices[0].message.content;
+        
+      } catch (error) {
+        console.error(`OpenAI API error for ${symbol}:`, error.message);
+        newsContent = `Unable to fetch latest news for ${symbol}. Please check your OpenAI API key.`;
+        newsSummary = 'News unavailable';
+      }
+    } else {
+      newsContent = `OpenAI API key not configured. Please add your API key to the .env file.`;
+      newsSummary = 'Configure API key for news';
+    }
+
+    // Store data for this symbol
+    sentimentData.data[symbol] = {
+      sentiment: {
+        rating: sentimentRating,
+        score: sentimentScore,
+        data: marketSentiment
+      },
+      news: {
+        content: newsContent,
+        summary: newsSummary,
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    // Small delay between API calls
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+
+  // Save to file
+  await writeSentimentData(sentimentData);
+  console.log('✅ All sentiment data fetched and saved\n');
+}
 
 // Middleware
 app.use(cors());
@@ -80,8 +228,7 @@ db.serialize(() => {
   `);
 });
 
-// Cryptocurrency symbols
-const SYMBOLS = ['BTC', 'ETH', 'XRP', 'SOL'];
+// Intervals for kline data
 const INTERVALS = {
   '1h': '1h',
   '4h': '4h',
@@ -409,99 +556,18 @@ app.get('/api/sentiment/:symbol', async (req, res) => {
   const { symbol } = req.params;
   
   try {
-    // Fetch sentiment from Alternative.me Fear & Greed Index (for BTC)
-    // This API provides general crypto market sentiment
-    let sentimentData = null;
-    let sentimentRating = 'Neutral';
-    let sentimentScore = 50;
+    // Read sentiment data from file
+    const sentimentData = await readSentimentData();
     
-    try {
-      // Alternative.me API only provides general market sentiment (mainly BTC-based)
-      const fearGreedResponse = await axios.get('https://api.alternative.me/fng/?limit=1');
-      if (fearGreedResponse.data && fearGreedResponse.data.data && fearGreedResponse.data.data[0]) {
-        const fngData = fearGreedResponse.data.data[0];
-        sentimentScore = parseInt(fngData.value);
-        
-        // Convert Fear & Greed score to Bull/Bear/Neutral
-        if (sentimentScore >= 60) {
-          sentimentRating = 'Bull';
-        } else if (sentimentScore <= 40) {
-          sentimentRating = 'Bear';
-        } else {
-          sentimentRating = 'Neutral';
-        }
-        
-        sentimentData = {
-          score: sentimentScore,
-          classification: fngData.value_classification,
-          timestamp: fngData.timestamp
-        };
-      }
-    } catch (error) {
-      console.error('Error fetching sentiment data:', error.message);
+    if (!sentimentData || !sentimentData.data || !sentimentData.data[symbol]) {
+      // Data not available, return error
+      return res.status(404).json({
+        error: 'Sentiment data not available',
+        message: 'Please wait for the scheduled update to fetch data'
+      });
     }
     
-    // Use OpenAI to get latest news/information
-    let newsContent = '';
-    let newsSummary = '';
-    let cacheHit = false;
-    
-    // Check cache first
-    const cachedNews = newsCache.get(symbol);
-    if (isCacheValid(cachedNews)) {
-      // Use cached data
-      newsContent = cachedNews.content;
-      newsSummary = cachedNews.summary;
-      cacheHit = true;
-      console.log(`📦 Cache hit for ${symbol} news (age: ${Math.round((Date.now() - cachedNews.timestamp) / 1000 / 60)} minutes)`);
-    } else {
-      // Fetch fresh data from OpenAI
-      if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'your_openai_api_key_here') {
-        try {
-          console.log(`🔄 Fetching fresh news for ${symbol} from OpenAI...`);
-          
-          const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini-search-preview-2025-03-11",
-            web_search_options: {
-              search_context_size: "high",
-            },
-            messages: [{
-              role: "user",
-              content: `Latest ${symbol} cryptocurrency news and market analysis. Provide a brief summary of the most recent developments, price movements, and market sentiment.`,
-            }],
-          });
-          
-          newsContent = completion.choices[0].message.content;
-          
-          // Create a shorter summary for the card display
-          const summaryCompletion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [{
-              role: "user",
-              content: `Summarize this in 2-3 sentences for a dashboard card: ${newsContent}`,
-            }],
-          });
-          
-          newsSummary = summaryCompletion.choices[0].message.content;
-          
-          // Store in cache
-          newsCache.set(symbol, {
-            content: newsContent,
-            summary: newsSummary,
-            timestamp: Date.now()
-          });
-          
-          console.log(`✅ Cached fresh news for ${symbol}`);
-        } catch (error) {
-          console.error('OpenAI API error:', error.message);
-          newsContent = `Unable to fetch latest news for ${symbol}. Please check your OpenAI API key.`;
-          newsSummary = 'News unavailable';
-        }
-      } else {
-        newsContent = `OpenAI API key not configured. Please add your API key to the .env file.`;
-        newsSummary = 'Configure API key for news';
-      }
-    }
+    const symbolData = sentimentData.data[symbol];
     
     // Get current price from database
     const priceData = await new Promise((resolve, reject) => {
@@ -522,17 +588,9 @@ app.get('/api/sentiment/:symbol', async (req, res) => {
     res.json({
       symbol,
       price: priceData ? priceData.price : 0,
-      sentiment: {
-        rating: sentimentRating,
-        score: sentimentScore,
-        data: sentimentData
-      },
-      news: {
-        content: newsContent,
-        summary: newsSummary,
-        timestamp: new Date().toISOString(),
-        cached: cacheHit
-      }
+      sentiment: symbolData.sentiment,
+      news: symbolData.news,
+      lastUpdate: sentimentData.lastUpdate
     });
     
   } catch (error) {
@@ -547,13 +605,179 @@ app.get('/api/sentiment/:symbol', async (req, res) => {
 // Initial data fetch on startup
 fetchAllData();
 
-// Schedule hourly updates
+// Check and fetch sentiment data on startup
+(async () => {
+  const needsUpdate = await needsSentimentUpdate();
+  if (needsUpdate) {
+    console.log('🚀 Initial sentiment data fetch needed...');
+    await fetchAllSentimentData();
+  } else {
+    console.log('✅ Sentiment data is up to date');
+  }
+})();
+
+// Schedule hourly updates for kline data
 cron.schedule('0 * * * *', () => {
-  console.log('\n⏰ Running scheduled data update...');
+  console.log('\n⏰ Running scheduled kline data update...');
   fetchAllData();
 });
 
+// Schedule sentiment data updates every 4 hours
+cron.schedule('0 */4 * * *', () => {
+  console.log('\n⏰ Running scheduled sentiment data update...');
+  fetchAllSentimentData();
+});
+
+// WebSocket connection to Binance
+let binanceWs = null;
+let reconnectInterval = null;
+
+function connectToBinance() {
+  if (binanceWs && binanceWs.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  const streams = ['btcusdt@ticker', 'ethusdt@ticker', 'xrpusdt@ticker', 'solusdt@ticker'];
+  const wsUrl = `wss://stream.binance.com:9443/ws/${streams.join('/')}`;
+
+  binanceWs = new WebSocket(wsUrl);
+
+  binanceWs.on('open', () => {
+    console.log('✅ Connected to Binance WebSocket');
+    if (reconnectInterval) {
+      clearInterval(reconnectInterval);
+      reconnectInterval = null;
+    }
+  });
+
+  binanceWs.on('message', (data) => {
+    try {
+      const ticker = JSON.parse(data);
+      const symbol = ticker.s.replace('USDT', ''); // Remove USDT suffix
+      const price = parseFloat(ticker.c); // Current price
+
+      // Store previous price before updating
+      if (currentPrices[symbol] !== null) {
+        previousPrices[symbol] = currentPrices[symbol];
+      }
+      
+      // Update current price
+      currentPrices[symbol] = price;
+
+      // Calculate price change
+      let priceChange = 0;
+      let priceChangePercent = 0;
+      
+      if (previousPrices[symbol] !== null) {
+        priceChange = price - previousPrices[symbol];
+        priceChangePercent = (priceChange / previousPrices[symbol]) * 100;
+      }
+
+      // Broadcast to all connected WebSocket clients
+      const priceUpdate = {
+        type: 'price_update',
+        symbol: symbol,
+        price: price,
+        previousPrice: previousPrices[symbol],
+        priceChange: priceChange,
+        priceChangePercent: priceChangePercent,
+        timestamp: Date.now()
+      };
+
+      wss.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(priceUpdate));
+        }
+      });
+    } catch (error) {
+      console.error('Error processing Binance message:', error);
+    }
+  });
+
+  binanceWs.on('error', (error) => {
+    console.error('❌ Binance WebSocket error:', error);
+  });
+
+  binanceWs.on('close', () => {
+    console.log('⚠️ Binance WebSocket disconnected');
+    // Attempt to reconnect after 5 seconds
+    if (!reconnectInterval) {
+      reconnectInterval = setInterval(() => {
+        console.log('🔄 Attempting to reconnect to Binance...');
+        connectToBinance();
+      }, 5000);
+    }
+  });
+}
+
+// Handle client WebSocket connections
+wss.on('connection', (ws) => {
+  console.log('👤 New client connected');
+
+  // Send current prices to new client
+  const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
+  symbols.forEach(symbol => {
+    if (currentPrices[symbol] !== null) {
+      const priceUpdate = {
+        type: 'price_update',
+        symbol: symbol,
+        price: currentPrices[symbol],
+        previousPrice: previousPrices[symbol],
+        priceChange: previousPrices[symbol] ? currentPrices[symbol] - previousPrices[symbol] : 0,
+        priceChangePercent: previousPrices[symbol] ? ((currentPrices[symbol] - previousPrices[symbol]) / previousPrices[symbol]) * 100 : 0,
+        timestamp: Date.now()
+      };
+      ws.send(JSON.stringify(priceUpdate));
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('👤 Client disconnected');
+  });
+
+  ws.on('error', (error) => {
+    console.error('Client WebSocket error:', error);
+  });
+});
+
+// Initialize prices from database on startup
+async function initializePrices() {
+  const symbols = ['BTC', 'ETH', 'XRP', 'SOL'];
+  
+  for (const symbol of symbols) {
+    try {
+      const priceData = await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT close as price
+           FROM kline_data
+           WHERE symbol = ? AND interval = '1h'
+           ORDER BY open_time DESC
+           LIMIT 1`,
+          [symbol],
+          (err, row) => {
+            if (err) reject(err);
+            else resolve(row);
+          }
+        );
+      });
+      
+      if (priceData && priceData.price) {
+        currentPrices[symbol] = priceData.price;
+        previousPrices[symbol] = priceData.price;
+      }
+    } catch (error) {
+      console.error(`Error initializing price for ${symbol}:`, error);
+    }
+  }
+}
+
 // Start server
-app.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  
+  // Initialize prices from database
+  await initializePrices();
+  
+  // Connect to Binance WebSocket
+  connectToBinance();
 });

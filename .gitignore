@@ -37,3 +37,6 @@ build/
 # Temporary files
 *.tmp
 *.temp
+
+# Sentiment data file
+sentiment-data.json

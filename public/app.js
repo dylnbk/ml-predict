@@ -95,6 +95,26 @@ let currentFullscreenSymbol = null;
 let currentView = 'chart';
 let allCryptoData = {}; // Store data for all cryptocurrencies
 
+// WebSocket connection
+let ws = null;
+let wsReconnectInterval = null;
+
+// Store initial and previous prices for price change display
+const initialPrices = {
+    BTC: null,
+    ETH: null,
+    XRP: null,
+    SOL: null
+};
+
+const previousPrices = {
+    BTC: null,
+    ETH: null,
+    XRP: null,
+    SOL: null
+};
+
+
 // Symbol colors
 const symbolColors = {
     'BTC': '#FFD700',
@@ -108,44 +128,44 @@ function createLineGradient(ctx, symbol, height) {
     const gradientColors = {
         'BTC': {
             stops: [
-                { position: 0, color: '#4A3C00' },    // Very dark gold/brown
-                { position: 0.25, color: '#8B6914' }, // Dark gold
-                { position: 0.5, color: '#cc8f00' },  // Medium gold
-                { position: 0.75, color: '#FFD700' }, // Bright gold
-                { position: 1, color: '#FFEA00' }     // Bright saturated yellow
+                { position: 0, color: '#FF5400' },
+                { position: 0.25, color: '#FF7800' },
+                { position: 0.5, color: '#FF8A00' },  
+                { position: 0.75, color: '#FFD700' }, 
+                { position: 1, color: '#FFEA00' }     
             ]
         },
         'ETH': {
             stops: [
-                { position: 0, color: '#1A0033' },    // Very dark purple
-                { position: 0.25, color: '#4A148C' }, // Dark purple
-                { position: 0.5, color: '#7B3FF2' },  // Medium purple
-                { position: 0.75, color: '#9C27B0' }, // Bright purple
-                { position: 1, color: '#E040FB' }     // Bright saturated purple/violet
+                { position: 0, color: '#460089' },    
+                { position: 0.25, color: '#5004AE' }, 
+                { position: 0.5, color: '#7B3FF2' },  
+                { position: 0.75, color: '#9C27B0' }, 
+                { position: 1, color: '#F625AC' }     
             ]
         },
         'XRP': {
             stops: [
-                { position: 0, color: '#003D4D' },    // Very dark teal
-                { position: 0.25, color: '#006064' }, // Dark cyan
-                { position: 0.5, color: '#007f8e' },  // Medium cyan
-                { position: 0.75, color: '#00BCD4' }, // Bright cyan
-                { position: 1, color: '#00E5FF' }     // Bright saturated cyan
+                { position: 0, color: '#055DCB' },   
+                { position: 0.25, color: '#0486D7' }, 
+                { position: 0.5, color: '#00BCD1' },  
+                { position: 0.75, color: '#02DAE2' }, 
+                { position: 1, color: '#00E5FF' }     
             ]
         },
         'SOL': {
             stops: [
-                { position: 0, color: '#002200' },    // Very dark green
-                { position: 0.25, color: '#1B5E20' }, // Dark green
-                { position: 0.5, color: '#00953e' },  // Medium green
-                { position: 0.75, color: '#00E676' }, // Bright green
-                { position: 1, color: '#76FF03' }     // Bright saturated green
+                { position: 0, color: '#009100' },
+                { position: 0.25, color: '#00A600' }, 
+                { position: 0.5, color: '#00B64C' },  
+                { position: 0.75, color: '#00E676' }, 
+                { position: 1, color: '#76FF03' }
             ]
         }
     };
     
     const gradient = gradientColors[symbol];
-    const lineGradient = ctx.createLinearGradient(0, height, 0, 0); // Bottom to top
+    const lineGradient = ctx.createLinearGradient(0, 450, 0, 0); 
     
     // Add all color stops for smooth transition
     gradient.stops.forEach(stop => {
@@ -285,17 +305,13 @@ async function updateChart(symbol, interval, animate = true) {
         
         // Update current price with smooth transition
         const currentPrice = prices[prices.length - 1];
-        const card = document.querySelector(`[data-symbol="${symbol}"]`);
-        const priceElement = card.querySelector('.price');
         
-        // Add transition class for price update
-        priceElement.style.transition = 'opacity 0.3s ease';
-        priceElement.style.opacity = '0.7';
+        // Set initial price if not set
+        if (initialPrices[symbol] === null) {
+            initialPrices[symbol] = currentPrice;
+        }
         
-        setTimeout(() => {
-            priceElement.textContent = `$${currentPrice.toFixed(currentPrice < 10 ? 4 : 2)}`;
-            priceElement.style.opacity = '1';
-        }, 150);
+        updatePriceDisplay(symbol, currentPrice);
     } catch (error) {
         console.error(`Error updating chart for ${symbol}:`, error);
     }
@@ -607,7 +623,10 @@ function formatTableDateTime(date, interval) {
     if (interval === '1d') {
         delete options.hour;
         delete options.minute;
-    } else if (interval === '4h') {
+    } else if (interval === '4h' || interval === '1h') {
+        // For both 1h and 4h intervals, use consistent "hour am/pm" format
+        options.hour = 'numeric';
+        options.hour12 = true;
         delete options.minute;
     }
     
@@ -769,15 +788,14 @@ function setupFullscreenFeature() {
         fullscreenTableContainer.classList.add('active');
         document.body.classList.add('fullscreen-active');
         
-        // Populate table with more data
+        // Populate table with ALL data, latest first
         if (allCryptoData[symbol]) {
             const data = allCryptoData[symbol];
-            // Show more rows in fullscreen (up to 50)
-            const rowsToShow = Math.min(data.length, 50);
+            // Show ALL data, reversed to show latest first
+            const reversedData = [...data].reverse();
             let tableHTML = '';
             
-            for (let i = 0; i < rowsToShow; i++) {
-                const item = data[i];
+            reversedData.forEach(item => {
                 const date = new Date(item.open_time);
                 const dateStr = formatTableDateTime(date, currentInterval);
                 const closePrice = item.close.toFixed(item.close < 10 ? 4 : 2);
@@ -794,7 +812,7 @@ function setupFullscreenFeature() {
                         <td>${accuracy}%</td>
                     </tr>
                 `;
-            }
+            });
             
             fullscreenTableBody.innerHTML = tableHTML;
         }
@@ -812,12 +830,11 @@ function setupFullscreenFeature() {
     function updateFullscreenTable(symbol) {
         if (allCryptoData[symbol]) {
             const data = allCryptoData[symbol];
-            // Show more rows in fullscreen (up to 50)
-            const rowsToShow = Math.min(data.length, 50);
+            // Show ALL data, reversed to show latest first
+            const reversedData = [...data].reverse();
             let tableHTML = '';
             
-            for (let i = 0; i < rowsToShow; i++) {
-                const item = data[i];
+            reversedData.forEach(item => {
                 const date = new Date(item.open_time);
                 const dateStr = formatTableDateTime(date, currentInterval);
                 const closePrice = item.close.toFixed(item.close < 10 ? 4 : 2);
@@ -834,7 +851,7 @@ function setupFullscreenFeature() {
                         <td>${accuracy}%</td>
                     </tr>
                 `;
-            }
+            });
             
             fullscreenTableBody.innerHTML = tableHTML;
         }
@@ -1083,7 +1100,223 @@ function setupSentimentFullscreen() {
     });
 }
 
-// Auto-refresh every 60 seconds
+// WebSocket connection management
+function connectWebSocket() {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}`;
+    
+    ws = new WebSocket(wsUrl);
+    
+    ws.onopen = () => {
+        console.log('✅ WebSocket connected');
+        if (wsReconnectInterval) {
+            clearInterval(wsReconnectInterval);
+            wsReconnectInterval = null;
+        }
+    };
+    
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'price_update') {
+                handlePriceUpdate(data);
+            }
+        } catch (error) {
+            console.error('Error processing WebSocket message:', error);
+        }
+    };
+    
+    ws.onerror = (error) => {
+        console.error('❌ WebSocket error:', error);
+    };
+    
+    ws.onclose = () => {
+        console.log('⚠️ WebSocket disconnected');
+        // Attempt to reconnect after 3 seconds
+        if (!wsReconnectInterval) {
+            wsReconnectInterval = setInterval(() => {
+                console.log('🔄 Attempting to reconnect WebSocket...');
+                connectWebSocket();
+            }, 3000);
+        }
+    };
+}
+
+// Handle real-time price updates
+function handlePriceUpdate(data) {
+    const { symbol, price, priceChange, priceChangePercent } = data;
+    
+    // Store initial price on first update
+    if (initialPrices[symbol] === null) {
+        initialPrices[symbol] = price;
+    }
+    
+    // Store previous price
+    if (previousPrices[symbol] === null) {
+        previousPrices[symbol] = price;
+    }
+    
+    // Update price display with change information
+    updatePriceDisplay(symbol, price, priceChange, priceChangePercent);
+    
+    // Update chart if we have the data
+    if (charts[symbol] && charts[symbol].data.datasets[0].data.length > 0) {
+        // Update the last data point in the chart
+        const dataset = charts[symbol].data.datasets[0];
+        dataset.data[dataset.data.length - 1] = price;
+        charts[symbol].update('none'); // Update without animation for smooth real-time updates
+    }
+}
+
+// Update price display with change information
+function updatePriceDisplay(symbol, price, priceChange = null, priceChangePercent = null) {
+    // Calculate 24h-style price change based on initial price
+    let change24h = 0;
+    let changePercent24h = 0;
+    
+    if (initialPrices[symbol] !== null) {
+        change24h = price - initialPrices[symbol];
+        changePercent24h = (change24h / initialPrices[symbol]) * 100;
+    }
+    
+    // Calculate immediate price change for flash effect
+    let immediateChange = 0;
+    if (priceChange === null && previousPrices[symbol] !== null) {
+        immediateChange = price - previousPrices[symbol];
+    } else if (priceChange !== null) {
+        immediateChange = priceChange;
+    }
+    
+    // Format price change display
+    const changePrefix = change24h >= 0 ? '+' : '';
+    const formattedChange = `${changePrefix}$${Math.abs(change24h).toFixed(change24h < 10 ? 4 : 2)}`;
+    const formattedPercent = `(${changePrefix}${Math.abs(changePercent24h).toFixed(2)}%)`;
+    const fullChangeText = `${formattedChange} ${formattedPercent}`;
+    
+    // Update all price displays for this symbol
+    const priceElements = document.querySelectorAll(`[data-symbol="${symbol}"] .price`);
+    priceElements.forEach(priceElement => {
+        // Format price
+        const formattedPrice = `$${price.toFixed(price < 10 ? 4 : 2)}`;
+        
+        // Determine flash class based on immediate price change
+        let flashClass = '';
+        if (immediateChange !== 0) {
+            flashClass = immediateChange > 0 ? 'flash-green' : 'flash-red';
+        }
+        
+        // Update price with flash effect
+        priceElement.textContent = formattedPrice;
+        
+        // Apply flash effect if there's a change
+        if (flashClass) {
+            priceElement.classList.add(flashClass);
+            // Remove flash class after animation completes
+            setTimeout(() => {
+                priceElement.classList.remove(flashClass);
+            }, 600);
+        }
+    });
+    
+    // Update price change displays for all views - COMMENTED OUT AS REQUESTED
+    // const changeElements = [
+    //     document.getElementById(`${symbol.toLowerCase()}-chart-change`),
+    //     document.getElementById(`${symbol.toLowerCase()}-table-change`),
+    //     document.getElementById(`${symbol.toLowerCase()}-sentiment-change`)
+    // ];
+    
+    // changeElements.forEach(changeElement => {
+    //     if (changeElement) {
+    //         changeElement.textContent = fullChangeText;
+    //         // Remove existing classes
+    //         changeElement.classList.remove('price-up', 'price-down');
+    //         // Add appropriate class
+    //         if (change24h > 0) {
+    //             changeElement.classList.add('price-up');
+    //         } else if (change24h < 0) {
+    //             changeElement.classList.add('price-down');
+    //         }
+    //     }
+    // });
+    
+    // Update fullscreen displays if active
+    if (currentFullscreenSymbol === symbol) {
+        const fullscreenPrice = document.getElementById('fullscreen-price');
+        const fullscreenTablePrice = document.getElementById('fullscreen-table-price');
+        const fullscreenSentimentPrice = document.getElementById('fullscreen-sentiment-price');
+        
+        [fullscreenPrice, fullscreenTablePrice, fullscreenSentimentPrice].forEach(elem => {
+            if (elem) {
+                elem.textContent = `$${price.toFixed(price < 10 ? 4 : 2)}`;
+                
+                // Apply flash effect if there's an immediate change
+                if (immediateChange !== 0) {
+                    const flashClass = immediateChange > 0 ? 'flash-green' : 'flash-red';
+                    elem.classList.add(flashClass);
+                    setTimeout(() => {
+                        elem.classList.remove(flashClass);
+                    }, 600);
+                }
+            }
+        });
+        
+        // Update fullscreen price change displays - COMMENTED OUT AS REQUESTED
+        // const fullscreenChangeElements = [
+        //     document.getElementById('fullscreen-price-change'),
+        //     document.getElementById('fullscreen-table-price-change'),
+        //     document.getElementById('fullscreen-sentiment-price-change')
+        // ];
+        
+        // fullscreenChangeElements.forEach(changeElement => {
+        //     if (changeElement) {
+        //         changeElement.textContent = fullChangeText;
+        //         // Remove existing classes
+        //         changeElement.classList.remove('price-up', 'price-down');
+        //         // Add appropriate class
+        //         if (change24h > 0) {
+        //             changeElement.classList.add('price-up');
+        //         } else if (change24h < 0) {
+        //             changeElement.classList.add('price-down');
+        //         }
+        //     }
+        // });
+    }
+    
+    // Update table view prices
+    const tablePriceElement = document.getElementById(`${symbol.toLowerCase()}-table-price`);
+    if (tablePriceElement) {
+        tablePriceElement.textContent = `$${price.toFixed(price < 10 ? 4 : 2)}`;
+        
+        // Apply flash effect if there's an immediate change
+        if (immediateChange !== 0) {
+            const flashClass = immediateChange > 0 ? 'flash-green' : 'flash-red';
+            tablePriceElement.classList.add(flashClass);
+            setTimeout(() => {
+                tablePriceElement.classList.remove(flashClass);
+            }, 600);
+        }
+    }
+    
+    // Update sentiment view prices
+    const sentimentPriceElement = document.getElementById(`${symbol.toLowerCase()}-sentiment-price`);
+    if (sentimentPriceElement) {
+        sentimentPriceElement.textContent = `$${price.toFixed(price < 10 ? 4 : 2)}`;
+        
+        // Apply flash effect if there's an immediate change
+        if (immediateChange !== 0) {
+            const flashClass = immediateChange > 0 ? 'flash-green' : 'flash-red';
+            sentimentPriceElement.classList.add(flashClass);
+            setTimeout(() => {
+                sentimentPriceElement.classList.remove(flashClass);
+            }, 600);
+        }
+    }
+    
+    // Store current price as previous for next update
+    previousPrices[symbol] = price;
+}
+
+// Auto-refresh every 60 seconds (as fallback)
 function startAutoRefresh() {
     setInterval(() => {
         updateAllCharts(false); // No animation for auto-refresh
@@ -1109,6 +1342,11 @@ async function init() {
     setupFullscreenFeature();
     setupSentimentFullscreen();
     await updateAllCharts(false); // No animation on initial load
+    
+    // Connect WebSocket for real-time updates
+    connectWebSocket();
+    
+    // Start auto-refresh as fallback
     startAutoRefresh();
 }
 

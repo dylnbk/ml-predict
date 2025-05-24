@@ -64,6 +64,7 @@
                 <div class="card-header">
                     <div class="price-info">
                         <span class="price">$0.00</span>
+                        <div class="price-change" id="btc-chart-change"></div>
                     </div>
                     <div class="symbol">BTC</div>
                 </div>
@@ -74,6 +75,7 @@
                 <div class="card-header">
                     <div class="price-info">
                         <span class="price">$0.00</span>
+                        <div class="price-change" id="eth-chart-change"></div>
                     </div>
                     <div class="symbol">ETH</div>
                 </div>
@@ -84,6 +86,7 @@
                 <div class="card-header">
                     <div class="price-info">
                         <span class="price">$0.00</span>
+                        <div class="price-change" id="xrp-chart-change"></div>
                     </div>
                     <div class="symbol">XRP</div>
                 </div>
@@ -94,6 +97,7 @@
                 <div class="card-header">
                     <div class="price-info">
                         <span class="price">$0.00</span>
+                        <div class="price-change" id="sol-chart-change"></div>
                     </div>
                     <div class="symbol">SOL</div>
                 </div>
@@ -109,6 +113,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="btc-table-price">$0.00</span>
+                            <div class="price-change" id="btc-table-change"></div>
                         </div>
                         <div class="symbol">BTC</div>
                     </div>
@@ -134,6 +139,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="eth-table-price">$0.00</span>
+                            <div class="price-change" id="eth-table-change"></div>
                         </div>
                         <div class="symbol">ETH</div>
                     </div>
@@ -159,6 +165,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="xrp-table-price">$0.00</span>
+                            <div class="price-change" id="xrp-table-change"></div>
                         </div>
                         <div class="symbol">XRP</div>
                     </div>
@@ -184,6 +191,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="sol-table-price">$0.00</span>
+                            <div class="price-change" id="sol-table-change"></div>
                         </div>
                         <div class="symbol">SOL</div>
                     </div>
@@ -214,6 +222,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="btc-sentiment-price">$0.00</span>
+                            <div class="price-change" id="btc-sentiment-change"></div>
                         </div>
                         <div class="symbol">BTC</div>
                     </div>
@@ -237,6 +246,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="eth-sentiment-price">$0.00</span>
+                            <div class="price-change" id="eth-sentiment-change"></div>
                         </div>
                         <div class="symbol">ETH</div>
                     </div>
@@ -260,6 +270,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="xrp-sentiment-price">$0.00</span>
+                            <div class="price-change" id="xrp-sentiment-change"></div>
                         </div>
                         <div class="symbol">XRP</div>
                     </div>
@@ -283,6 +294,7 @@
                     <div class="card-header">
                         <div class="price-info">
                             <span class="price" id="sol-sentiment-price">$0.00</span>
+                            <div class="price-change" id="sol-sentiment-change"></div>
                         </div>
                         <div class="symbol">SOL</div>
                     </div>
@@ -312,6 +324,7 @@
             <div>
                 <span class="fullscreen-symbol" id="fullscreen-symbol">BTC</span>
                 <span class="fullscreen-price" id="fullscreen-price">$0.00</span>
+                <div class="price-change" id="fullscreen-price-change"></div>
             </div>
         </div>
         <div class="fullscreen-chart-container">
@@ -327,6 +340,7 @@
             <div>
                 <span class="fullscreen-symbol" id="fullscreen-table-symbol">BTC</span>
                 <span class="fullscreen-price" id="fullscreen-table-price">$0.00</span>
+                <div class="price-change" id="fullscreen-table-price-change"></div>
             </div>
         </div>
         <div class="fullscreen-table-container">
@@ -354,6 +368,7 @@
             <div>
                 <span class="fullscreen-symbol" id="fullscreen-sentiment-symbol">BTC</span>
                 <span class="fullscreen-price" id="fullscreen-sentiment-price">$0.00</span>
+                <div class="price-change" id="fullscreen-sentiment-price-change"></div>
             </div>
         </div>
         <div class="fullscreen-sentiment-container">
