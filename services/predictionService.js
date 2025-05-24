@@ -12,7 +12,7 @@ class PredictionService {
     
     // Initialize AI providers
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
+    this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-pro-preview-05-06' });
     
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
@@ -37,21 +37,36 @@ class PredictionService {
       const currentTime = Date.now();
       
       // Get both future predictions and recent past predictions with actual prices
+      // Group by target_time and get the most recent prediction for each
       const query = `
         SELECT
-          target_time as timestamp,
-          predicted_price,
-          actual_price
-        FROM predictions
-        WHERE symbol = ?
-          AND interval = ?
-          AND ai_provider = ?
-          AND (target_time > ? OR (target_time > ? - 86400000 AND actual_price IS NOT NULL))
-        ORDER BY target_time ASC
+          p1.target_time as timestamp,
+          p1.predicted_price,
+          p1.actual_price
+        FROM predictions p1
+        INNER JOIN (
+          SELECT
+            target_time,
+            MAX(prediction_time) as max_prediction_time
+          FROM predictions
+          WHERE symbol = ?
+            AND interval = ?
+            AND ai_provider = ?
+            AND (target_time > ? OR (target_time > ? - 86400000 AND actual_price IS NOT NULL))
+          GROUP BY target_time
+        ) p2 ON p1.target_time = p2.target_time
+            AND p1.prediction_time = p2.max_prediction_time
+        WHERE p1.symbol = ?
+          AND p1.interval = ?
+          AND p1.ai_provider = ?
+        ORDER BY p1.target_time ASC
         LIMIT 50
       `;
 
-      this.db.all(query, [symbol, interval, aiProvider, currentTime, currentTime], (err, rows) => {
+      this.db.all(query, [
+        symbol, interval, aiProvider, currentTime, currentTime,
+        symbol, interval, aiProvider
+      ], (err, rows) => {
         if (err) {
           reject(err);
         } else {
@@ -127,118 +142,213 @@ class PredictionService {
    * @param {string} prompt - The formatted prompt
    * @returns {Promise<string>} AI response text
    */
-  async generateWithProvider(provider, prompt) {
-    switch (provider) {
-      case 'gpt':
-        const openaiResponse = await this.openai.responses.create({
-          model: 'o4-mini',
-          reasoning: { effort: 'medium' },
-          input: [
-            {
-              role: 'system',
-              content: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON.'
-            },
-            {
-              role: 'user',
-              content: prompt
-            }
-          ]
-        });
-        return openaiResponse.output_text;
+  async generateWithProvider(provider, prompt, retryCount = 0) {
+    const maxRetries = 3;
+    
+    try {
+      switch (provider) {
+        case 'gpt':
+          const openaiResponse = await this.openai.responses.create({
+            model: 'o4-mini',
+            reasoning: { effort: 'medium' },
+            input: [
+              {
+                role: 'system',
+                content: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.'
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ]
+          });
+          return openaiResponse.output_text;
 
-      case 'claude':
-        const claudeResponse = await this.anthropic.messages.create({
-          model: 'claude-3-5-sonnet-latest',
-          max_tokens: 1000,
-          temperature: 0.7,
-          system: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON.',
-          messages: [
-            {
-              role: 'user',
-              content: prompt
-            }
-          ]
-        });
-        return claudeResponse.content[0].text;
+        case 'claude':
+          const claudeResponse = await this.anthropic.messages.create({
+            model: 'claude-3-7-sonnet-latest',
+            max_tokens: 8000, // Significantly increased for 24 predictions
+            temperature: 0.7,
+            system: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.',
+            messages: [
+              {
+                role: 'user',
+                content: prompt
+              }
+            ]
+          });
+          return claudeResponse.content[0].text;
 
-      case 'gemini':
-      default:
-        const result = await this.geminiModel.generateContent(prompt);
-        const response = await result.response;
-        return response.text();
+        case 'gemini':
+        default:
+          // Configure Gemini with generation config for more consistent output
+          const generationConfig = {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 8192, // Significantly increased for 24 predictions
+          };
+          
+          const result = await this.geminiModel.generateContent({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig,
+          });
+          const response = await result.response;
+          const text = response.text();
+          
+          // Validate that Gemini returned JSON
+          if (!text || text.trim().length === 0) {
+            throw new Error('Gemini returned empty response');
+          }
+          
+          // Check if response contains JSON
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) {
+            console.error(`Gemini response without JSON (attempt ${retryCount + 1}/${maxRetries + 1}):`, text);
+            throw new Error('Gemini response does not contain valid JSON');
+          }
+          
+          return text;
+      }
+    } catch (error) {
+      console.error(`Error with ${provider} (attempt ${retryCount + 1}/${maxRetries + 1}):`, error.message);
+      
+      // Retry logic for transient errors
+      if (retryCount < maxRetries) {
+        console.log(`Retrying ${provider} after ${(retryCount + 1) * 2} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 2000));
+        return this.generateWithProvider(provider, prompt, retryCount + 1);
+      }
+      
+      // If all retries failed, throw the error
+      throw error;
     }
   }
 
   /**
-   * Generate predictions for a cryptocurrency
+   * Generate predictions for a cryptocurrency with exponential backoff retry
    * @param {string} symbol - Cryptocurrency symbol (e.g., 'BTC', 'ETH')
    * @param {string} interval - Time interval ('1h', '4h', '1d')
    * @param {string} aiProvider - AI provider ('gemini', 'gpt', 'claude')
+   * @param {number} maxRetries - Maximum number of retries (default: 3)
    * @returns {Promise<Object>} Prediction results
    */
-  async generatePredictions(symbol, interval, aiProvider = 'gemini') {
-    try {
-      console.log(`🔮 Generating predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...`);
-
-      // Fetch latest 100 kline data points
-      const klineData = await this.fetchKlineData(symbol, interval, 100);
-      if (!klineData || klineData.length === 0) {
-        throw new Error('No historical data available');
-      }
-
-      // Fetch latest technical indicators
-      const indicators = await this.fetchTechnicalIndicators(symbol, interval);
-
-      // Read sentiment data from file
-      const sentimentData = await this.readSentimentData();
-
-      // Format prompt
-      const prompt = formatPredictionPrompt(symbol, interval, klineData, indicators, sentimentData);
-
-      // Generate predictions using selected AI provider
-      const text = await this.generateWithProvider(aiProvider, prompt);
-
-      // Parse and validate response
-      let predictions;
+  async generatePredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
+    let lastError;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        // Extract JSON from response (in case there's extra text)
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-          throw new Error('No JSON found in response');
+        console.log(`🔮 Generating predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
+
+        // Fetch latest 100 kline data points
+        const klineData = await this.fetchKlineData(symbol, interval, 100);
+        if (!klineData || klineData.length === 0) {
+          throw new Error('No historical data available');
         }
-        predictions = JSON.parse(jsonMatch[0]);
-      } catch (parseError) {
-        console.error(`Failed to parse ${aiProvider} response:`, text);
-        throw new Error(`Invalid response format: ${parseError.message}`);
+
+        // Fetch latest technical indicators
+        const indicators = await this.fetchTechnicalIndicators(symbol, interval);
+
+        // Read sentiment data from file
+        const sentimentData = await this.readSentimentData();
+
+        // Format prompt
+        const prompt = formatPredictionPrompt(symbol, interval, klineData, indicators, sentimentData);
+
+        // Generate predictions using selected AI provider with retry logic
+        let text;
+        let predictions;
+        
+        try {
+          text = await this.generateWithProvider(aiProvider, prompt);
+          
+          // Parse and validate response
+          try {
+            // Extract JSON from response (in case there's extra text)
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+              throw new Error('No JSON found in response');
+            }
+            predictions = JSON.parse(jsonMatch[0]);
+          } catch (parseError) {
+            console.error(`Failed to parse ${aiProvider} response:`, text);
+            throw new Error(`Invalid response format: ${parseError.message}`);
+          }
+        } catch (error) {
+          // Log the error with more context
+          console.error(`Failed to generate predictions with ${aiProvider}:`, error.message);
+          
+          // For Gemini specifically, provide more detailed error info
+          if (aiProvider === 'gemini') {
+            console.error('Gemini API failed to return valid JSON. This may be a temporary issue.');
+            console.error('Consider trying again or using a different AI provider.');
+          }
+          
+          throw error;
+        }
+
+        // Validate predictions format
+        if (!predictions || typeof predictions !== 'object' || !Array.isArray(predictions.predictions)) {
+          throw new Error(`Invalid prediction format from ${aiProvider}`);
+        }
+        
+        // Ensure each prediction has required fields
+        const validPredictions = predictions.predictions.every(pred =>
+          pred.hasOwnProperty('timestamp') &&
+          pred.hasOwnProperty('price') &&
+          typeof pred.timestamp === 'number' &&
+          typeof pred.price === 'number' &&
+          pred.price > 0
+        );
+        
+        if (!validPredictions) {
+          throw new Error(`Invalid prediction data from ${aiProvider}`);
+        }
+        
+        // Check if we got the expected 24 predictions
+        if (predictions.predictions.length < 24) {
+          console.warn(`⚠️ ${aiProvider} returned only ${predictions.predictions.length} predictions instead of 24 for ${symbol} (${interval})`);
+          
+          // If we got less than 20 predictions, consider it a failure and retry
+          if (predictions.predictions.length < 20) {
+            throw new Error(`Insufficient predictions returned: ${predictions.predictions.length}/24`);
+          }
+        }
+
+        // Store predictions in database with AI provider
+        const predictionTime = Date.now();
+        await this.storePredictions(symbol, interval, predictionTime, predictions.predictions, aiProvider);
+
+        console.log(`✅ Generated ${predictions.predictions.length} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`);
+        
+        return {
+          success: true,
+          symbol,
+          interval,
+          aiProvider,
+          predictionTime,
+          predictions: predictions.predictions
+        };
+
+      } catch (error) {
+        lastError = error;
+        console.error(`Error generating predictions for ${symbol} with ${aiProvider} (attempt ${attempt + 1}/${maxRetries + 1}):`, error.message);
+        
+        // If this isn't the last attempt, wait with exponential backoff
+        if (attempt < maxRetries) {
+          const waitTime = Math.pow(2, attempt) * 2000; // 2s, 4s, 8s
+          console.log(`⏳ Waiting ${waitTime / 1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
       }
-
-      // Validate predictions format
-      if (!validatePredictionResponse(predictions)) {
-        throw new Error(`Invalid prediction format from ${aiProvider}`);
-      }
-
-      // Store predictions in database with AI provider
-      const predictionTime = Date.now();
-      await this.storePredictions(symbol, interval, predictionTime, predictions.predictions, aiProvider);
-
-      console.log(`✅ Generated ${predictions.predictions.length} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`);
-      
-      return {
-        success: true,
-        symbol,
-        interval,
-        aiProvider,
-        predictionTime,
-        predictions: predictions.predictions
-      };
-
-    } catch (error) {
-      console.error(`Error generating predictions for ${symbol} with ${aiProvider}:`, error);
-      return {
-        success: false,
-        error: error.message
-      };
     }
+    
+    // All attempts failed
+    console.error(`❌ Failed to generate predictions for ${symbol} with ${aiProvider} after ${maxRetries + 1} attempts`);
+    return {
+      success: false,
+      error: lastError.message
+    };
   }
 
   /**
@@ -321,19 +431,20 @@ class PredictionService {
   storePredictions(symbol, interval, predictionTime, predictions, aiProvider = 'gemini') {
     return new Promise((resolve, reject) => {
       const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO predictions
+        INSERT OR IGNORE INTO predictions
         (symbol, interval, prediction_time, target_time, predicted_price, model_version, ai_provider)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
 
       let completed = 0;
       let hasError = false;
+      let skipped = 0;
 
       // Map provider to model version
       const modelVersions = {
-        'gemini': 'gemini-2.0-flash-exp',
+        'gemini': 'gemini-2.5-pro-preview-05-06',
         'gpt': 'o4-mini',
-        'claude': 'claude-3-5-sonnet-latest'
+        'claude': 'claude-3-7-sonnet-latest'
       };
 
       predictions.forEach(pred => {
@@ -345,7 +456,7 @@ class PredictionService {
           pred.price,
           modelVersions[aiProvider] || modelVersions['gemini'],
           aiProvider,
-          (err) => {
+          function(err) {
             if (err && !hasError) {
               hasError = true;
               stmt.finalize();
@@ -353,9 +464,18 @@ class PredictionService {
               return;
             }
             
+            // Check if row was actually inserted (changes will be 0 if ignored)
+            if (this.changes === 0) {
+              skipped++;
+              console.warn(`⚠️ Duplicate prediction skipped: ${symbol} ${interval} at ${new Date(pred.timestamp).toISOString()} - preserving historical data`);
+            }
+            
             completed++;
             if (completed === predictions.length && !hasError) {
               stmt.finalize();
+              if (skipped > 0) {
+                console.log(`✅ Stored ${predictions.length - skipped} new predictions, skipped ${skipped} duplicates for ${symbol} (${interval})`);
+              }
               resolve();
             }
           }
@@ -427,14 +547,14 @@ class PredictionService {
     return new Promise((resolve, reject) => {
       const currentTime = Date.now();
       const query = `
-        SELECT id, target_time, predicted_price
+        SELECT id, target_time, predicted_price, ai_provider
         FROM predictions
-        WHERE symbol = ? 
+        WHERE symbol = ?
           AND interval = ?
           AND actual_price IS NULL
           AND target_time <= ?
         ORDER BY target_time
-        LIMIT 100
+        LIMIT 300
       `;
 
       this.db.all(query, [symbol, interval, currentTime], (err, rows) => {
