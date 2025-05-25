@@ -233,12 +233,12 @@ class PredictionService {
    * @param {number} maxRetries - Maximum number of retries (default: 3)
    * @returns {Promise<Object>} Prediction results
    */
-  async generatePredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
+  async generatePredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3, predictionsCount = 24) {
     let lastError;
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`🔮 Generating predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
+        console.log(`🔮 Generating ${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
 
         // Fetch latest 100 kline data points
         const klineData = await this.fetchKlineData(symbol, interval, 100);
@@ -246,14 +246,29 @@ class PredictionService {
           throw new Error('No historical data available');
         }
 
+        // Fetch existing future predictions for context
+        const existingPredictions = await this.getExistingFuturePredictions(symbol, interval, aiProvider);
+
         // Fetch latest technical indicators
         const indicators = await this.fetchTechnicalIndicators(symbol, interval);
 
         // Read sentiment data from file
         const sentimentData = await this.readSentimentData();
 
-        // Format prompt
-        const prompt = formatPredictionPrompt(symbol, interval, klineData, indicators, sentimentData);
+        // Calculate the starting timestamp for new predictions
+        const nextTimestamp = this.calculateNextTimestamp(interval, existingPredictions, klineData);
+
+        // Format prompt with existing predictions context
+        const prompt = formatPredictionPrompt(
+          symbol,
+          interval,
+          klineData,
+          indicators,
+          sentimentData,
+          existingPredictions,
+          predictionsCount,
+          nextTimestamp
+        );
 
         // Generate predictions using selected AI provider with retry logic
         let text;
@@ -305,13 +320,14 @@ class PredictionService {
           throw new Error(`Invalid prediction data from ${aiProvider}`);
         }
         
-        // Check if we got the expected 24 predictions
-        if (predictions.predictions.length < 24) {
-          console.warn(`⚠️ ${aiProvider} returned only ${predictions.predictions.length} predictions instead of 24 for ${symbol} (${interval})`);
+        // Check if we got the expected number of predictions
+        if (predictions.predictions.length < predictionsCount) {
+          console.warn(`⚠️ ${aiProvider} returned only ${predictions.predictions.length} predictions instead of ${predictionsCount} for ${symbol} (${interval})`);
           
-          // If we got less than 20 predictions, consider it a failure and retry
-          if (predictions.predictions.length < 20) {
-            throw new Error(`Insufficient predictions returned: ${predictions.predictions.length}/24`);
+          // If we got less than 80% of requested predictions, consider it a failure and retry
+          const minAcceptable = Math.ceil(predictionsCount * 0.8);
+          if (predictions.predictions.length < minAcceptable) {
+            throw new Error(`Insufficient predictions returned: ${predictions.predictions.length}/${predictionsCount}`);
           }
         }
 
@@ -349,6 +365,161 @@ class PredictionService {
       success: false,
       error: lastError.message
     };
+  }
+
+  /**
+   * Count existing future predictions for a symbol/interval/provider
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @returns {Promise<number>} Number of existing future predictions
+   */
+  async countFuturePredictions(symbol, interval, aiProvider) {
+    return new Promise((resolve, reject) => {
+      const currentTime = Date.now();
+      const query = `
+        SELECT COUNT(*) as count
+        FROM predictions
+        WHERE symbol = ?
+          AND interval = ?
+          AND ai_provider = ?
+          AND target_time > ?
+      `;
+
+      this.db.get(query, [symbol, interval, aiProvider, currentTime], (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row.count);
+        }
+      });
+    });
+  }
+
+  /**
+   * Get existing future predictions for context
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @returns {Promise<Array>} Array of existing future predictions
+   */
+  async getExistingFuturePredictions(symbol, interval, aiProvider) {
+    return new Promise((resolve, reject) => {
+      const currentTime = Date.now();
+      
+      // Get the most recent prediction for each future target_time
+      const query = `
+        SELECT
+          p1.target_time,
+          p1.predicted_price
+        FROM predictions p1
+        INNER JOIN (
+          SELECT
+            target_time,
+            MAX(prediction_time) as max_prediction_time
+          FROM predictions
+          WHERE symbol = ?
+            AND interval = ?
+            AND ai_provider = ?
+            AND target_time > ?
+          GROUP BY target_time
+        ) p2 ON p1.target_time = p2.target_time
+            AND p1.prediction_time = p2.max_prediction_time
+        WHERE p1.symbol = ?
+          AND p1.interval = ?
+          AND p1.ai_provider = ?
+        ORDER BY p1.target_time ASC
+      `;
+
+      this.db.all(query, [
+        symbol, interval, aiProvider, currentTime,
+        symbol, interval, aiProvider
+      ], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  /**
+   * Calculate the next timestamp for new predictions
+   * @param {string} interval - Time interval
+   * @param {Array} existingPredictions - Existing future predictions
+   * @param {Array} klineData - Historical kline data
+   * @returns {number} Next timestamp for predictions
+   */
+  calculateNextTimestamp(interval, existingPredictions, klineData) {
+    const intervalHours = interval === '1h' ? 1 : interval === '4h' ? 4 : 24;
+    const intervalMs = intervalHours * 3600 * 1000;
+
+    if (existingPredictions.length > 0) {
+      // Start from the last existing prediction timestamp
+      const lastTimestamp = Math.max(...existingPredictions.map(p => p.target_time));
+      return lastTimestamp + intervalMs;
+    } else {
+      // Start from the last historical data point
+      const lastHistoricalTimestamp = klineData[klineData.length - 1].timestamp;
+      return lastHistoricalTimestamp + intervalMs;
+    }
+  }
+
+  /**
+   * Generate rolling predictions (only missing ones)
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @param {number} maxRetries - Maximum number of retries
+   * @returns {Promise<Object>} Rolling prediction results
+   */
+  async generateRollingPredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
+    try {
+      console.log(`🔄 Checking rolling predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...`);
+
+      // Count existing future predictions
+      const existingCount = await this.countFuturePredictions(symbol, interval, aiProvider);
+      const predictionsNeeded = Math.max(0, 24 - existingCount);
+
+      console.log(`📊 Found ${existingCount} existing future predictions, need ${predictionsNeeded} more`);
+
+      if (predictionsNeeded === 0) {
+        console.log(`✅ Already have 24 future predictions for ${symbol} (${interval}), no rolling needed`);
+        return {
+          success: true,
+          symbol,
+          interval,
+          aiProvider,
+          predictionsNeeded: 0,
+          generated: 0,
+          message: 'No new predictions needed'
+        };
+      }
+
+      // Generate the missing predictions
+      const result = await this.generatePredictions(symbol, interval, aiProvider, maxRetries, predictionsNeeded);
+      
+      if (result.success) {
+        console.log(`✅ Rolling predictions completed for ${symbol} (${interval}): generated ${predictionsNeeded} new predictions`);
+      }
+
+      return {
+        ...result,
+        predictionsNeeded,
+        generated: result.success ? predictionsNeeded : 0
+      };
+
+    } catch (error) {
+      console.error(`❌ Error in rolling predictions for ${symbol} (${interval}):`, error.message);
+      return {
+        success: false,
+        error: error.message,
+        symbol,
+        interval,
+        aiProvider
+      };
+    }
   }
 
   /**
