@@ -13,8 +13,8 @@ const chartOptions = {
         decimation: {
             enabled: true,
             algorithm: 'lttb',
-            samples: 200,
-            threshold: 200
+            samples: 100,
+            threshold: 100
         },
         tooltip: {
             enabled: true,
@@ -333,21 +333,25 @@ function formatTimeFullscreen(timestamp, interval) {
 }
 
 // Update chart data with smooth transitions
-async function updateChart(symbol, interval, animate = true) {
+async function updateChart(symbol, interval, animate = true, isFullscreen = false) {
     try {
         const response = await fetch(`/api/klines/${symbol}/${interval}?limit=1000`);
         const data = await response.json();
         
         if (data.length === 0) return;
         
-        // Store data for table view
+        // Store full data for table view and fullscreen charts
         allCryptoData[symbol] = data;
         
         // Fetch predictions for the current AI model
         const predictions = await fetchPredictions(symbol, interval);
         
-        const labels = data.map(k => formatTime(k.open_time, interval));
-        const prices = data.map(k => k.close);
+        // For grid charts, limit to last 150 data points
+        // For fullscreen charts, use all available data
+        const chartData = isFullscreen ? data : data.slice(-150);
+        
+        const labels = chartData.map(k => formatTime(k.open_time, interval));
+        const prices = chartData.map(k => k.close);
         
         // Update line gradient based on new data range
         const canvas = document.getElementById(`${symbol.toLowerCase()}-chart`);
@@ -367,7 +371,7 @@ async function updateChart(symbol, interval, animate = true) {
         
         if (predictions && predictions.length > 0) {
             const currentTime = Date.now();
-            const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+            const lastHistoricalTime = chartData.length > 0 ? chartData[chartData.length - 1].open_time : 0;
             
             predictions.forEach(pred => {
                 const predLabel = formatTime(pred.timestamp, interval);
@@ -417,13 +421,13 @@ async function updateChart(symbol, interval, animate = true) {
                         // Create a map of timestamps to prediction values for faster lookup
                         const predictionMap = new Map();
                         predictions.forEach(pred => {
-                            if (pred.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : 0)) {
+                            if (pred.timestamp <= (chartData.length > 0 ? chartData[chartData.length - 1].open_time : 0)) {
                                 predictionMap.set(pred.timestamp, pred.predicted_price);
                             }
                         });
                         
                         // Map data by matching timestamps instead of formatted labels
-                        const mappedData = data.map(dataPoint => {
+                        const mappedData = chartData.map(dataPoint => {
                             return predictionMap.get(dataPoint.open_time) || null;
                         });
                         
@@ -433,7 +437,9 @@ async function updateChart(symbol, interval, animate = true) {
                                 predictionMapSize: predictionMap.size,
                                 mappedDataLength: mappedData.length,
                                 nonNullValues: mappedData.filter(v => v !== null).length,
-                                mappedData: mappedData.filter(v => v !== null)
+                                mappedData: mappedData.filter(v => v !== null),
+                                isFullscreen: isFullscreen,
+                                chartDataLength: chartData.length
                             });
                         }
                         
@@ -556,8 +562,8 @@ async function updateAllCharts(animate = true) {
         }
     }
     
-    // Update charts in parallel for better performance
-    await Promise.all(symbols.map(symbol => updateChart(symbol, currentInterval, animate)));
+    // Update charts in parallel for better performance (grid charts with 150 point limit)
+    await Promise.all(symbols.map(symbol => updateChart(symbol, currentInterval, animate, false)));
     
     // Update table if in table view
     if (currentView === 'table') {
@@ -1118,7 +1124,7 @@ function setupFullscreenFeature() {
     const fullscreenTableBody = document.getElementById('fullscreen-table-body');
     
     // Function to open fullscreen chart
-    function openFullscreenChart(symbol) {
+    async function openFullscreenChart(symbol) {
         currentFullscreenSymbol = symbol;
         const card = document.querySelector(`#chart-view [data-symbol="${symbol}"]`);
         const price = card.querySelector('.price').textContent;
@@ -1138,110 +1144,110 @@ function setupFullscreenFeature() {
         // Get current chart data and reformat labels for fullscreen
         const sourceChart = charts[symbol];
         
-        // Fetch fresh data to get timestamps for proper formatting
-        fetch(`/api/klines/${symbol}/${currentInterval}?limit=1000`)
-            .then(response => response.json())
-            .then(async data => {
-                const labels = data.map(k => formatTimeFullscreen(k.open_time, currentInterval));
-                const prices = data.map(k => k.close);
+        // Use the full dataset for fullscreen charts
+        const response = await fetch(`/api/klines/${symbol}/${currentInterval}?limit=1000`);
+        const data = await response.json();
+        
+        const labels = data.map(k => formatTimeFullscreen(k.open_time, currentInterval));
+        const prices = data.map(k => k.close);
+        
+        // Fetch predictions for the current AI model
+        const predictions = await fetchPredictions(symbol, currentInterval);
                 
-                // Fetch predictions for the current AI model
-                const predictions = await fetchPredictions(symbol, currentInterval);
+        // Prepare prediction data
+        let pastPredictionLabels = [];
+        let pastPredictionData = [];
+        let futurePredictionLabels = [];
+        let futurePredictionData = [];
+        
+        if (predictions && predictions.length > 0) {
+            const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+            
+            predictions.forEach(pred => {
+                const predLabel = formatTimeFullscreen(pred.timestamp, currentInterval);
+                const predPrice = pred.predicted_price;
                 
-                // Prepare prediction data
-                let pastPredictionLabels = [];
-                let pastPredictionData = [];
-                let futurePredictionLabels = [];
-                let futurePredictionData = [];
-                
-                if (predictions && predictions.length > 0) {
-                    const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
-                    
-                    predictions.forEach(pred => {
-                        const predLabel = formatTimeFullscreen(pred.timestamp, currentInterval);
-                        const predPrice = pred.predicted_price;
-                        
-                        if (pred.timestamp <= lastHistoricalTime) {
-                            // Past prediction
-                            pastPredictionLabels.push(predLabel);
-                            pastPredictionData.push(predPrice);
-                        } else {
-                            // Future prediction
-                            futurePredictionLabels.push(predLabel);
-                            futurePredictionData.push(predPrice);
-                        }
-                    });
+                if (pred.timestamp <= lastHistoricalTime) {
+                    // Past prediction
+                    pastPredictionLabels.push(predLabel);
+                    pastPredictionData.push(predPrice);
+                } else {
+                    // Future prediction
+                    futurePredictionLabels.push(predLabel);
+                    futurePredictionData.push(predPrice);
                 }
-                
-                // Create prediction gradients (more subtle)
-                const predictionLineGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
-                const baseColor = symbolColors[symbol];
-                predictionLineGradient.addColorStop(0, `${baseColor}40`); // 25% opacity
-                predictionLineGradient.addColorStop(1, `${baseColor}20`); // 12.5% opacity
-                
-                const predictionAreaGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
-                predictionAreaGradient.addColorStop(0, `${baseColor}08`); // 5% opacity
-                predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
-                
-                const chartData = {
-                    labels: futurePredictionLabels.length > 0 ? labels.concat(futurePredictionLabels) : labels,
-                    datasets: [
-                        // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
-                        {
-                            label: symbol,
-                            data: prices,
-                            borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
-                            backgroundColor: 'transparent',
-                            fill: false,
-                            borderWidth: 3,
-                            pointRadius: 0,
-                            tension: 0.2
-                        },
-                        // Past predictions - WITH AREA FILL
-                        {
-                            label: `${symbol} Past Predictions`,
-                            data: pastPredictionData.length > 0 ?
-                                labels.map(label => {
-                                    const idx = pastPredictionLabels.indexOf(label);
-                                    return idx !== -1 ? pastPredictionData[idx] : null;
-                                }) : [],
-                            borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
-                            backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
-                            fill: true,
-                            borderWidth: 1.5, // Slightly thinner line
-                            borderDash: [], // Solid line
-                            pointRadius: 2, 
-                            pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
-                            pointBorderColor: 'rgba(255, 255, 255, 0.4)',
-                            pointBorderWidth: 1,
-                            pointHoverRadius: 6,
-                            tension: 0.2,
-                            spanGaps: true
-                        },
-                        // Future predictions - DOTTED LINE NO AREA FILL
-                        {
-                            label: `${symbol} Future Predictions`,
-                            data: labels.concat(futurePredictionLabels).map((label, idx) => {
-                                if (idx === labels.length - 1) {
-                                    // Connect to last actual price
-                                    return prices[prices.length - 1];
-                                } else if (idx >= labels.length) {
-                                    const predIdx = futurePredictionLabels.indexOf(label);
-                                    return predIdx !== -1 ? futurePredictionData[predIdx] : null;
-                                }
-                                return null;
-                            }),
-                            borderColor: predictionLineGradient,
-                            backgroundColor: 'transparent',
-                            fill: false,
-                            borderWidth: 3,
-                            borderDash: [4, 6],
-                            pointRadius: 0,
-                            tension: 0.2,
-                            spanGaps: true
+            });
+        }
+        
+        // Create prediction gradients (more subtle)
+        const predictionLineGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
+        const baseColor = symbolColors[symbol];
+        predictionLineGradient.addColorStop(0, `${baseColor}40`); // 25% opacity
+        predictionLineGradient.addColorStop(1, `${baseColor}20`); // 12.5% opacity
+        
+        const predictionAreaGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
+        predictionAreaGradient.addColorStop(0, `${baseColor}08`); // 5% opacity
+        predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
+        
+        const chartData = {
+            labels: futurePredictionLabels.length > 0 ? labels.concat(futurePredictionLabels) : labels,
+            datasets: [
+                // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
+                {
+                    label: symbol,
+                    data: prices,
+                    borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    borderWidth: 3,
+                    pointRadius: 0,
+                    tension: 0.2
+                },
+                // Past predictions - WITH AREA FILL
+                {
+                    label: `${symbol} Past Predictions`,
+                    data: pastPredictionData.length > 0 ?
+                        labels.map(label => {
+                            const idx = pastPredictionLabels.indexOf(label);
+                            return idx !== -1 ? pastPredictionData[idx] : null;
+                        }) : [],
+                    borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                    backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                    fill: true,
+                    borderWidth: 1.5, // Slightly thinner line
+                    borderDash: [], // Solid line
+                    pointRadius: 2,
+                    pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                    pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                    pointBorderWidth: 1,
+                    pointHoverRadius: 6,
+                    tension: 0.2,
+                    spanGaps: true
+                },
+                // Future predictions - DOTTED LINE NO AREA FILL
+                {
+                    label: `${symbol} Future Predictions`,
+                    data: labels.concat(futurePredictionLabels).map((label, idx) => {
+                        if (idx === labels.length - 1) {
+                            // Connect to last actual price
+                            return prices[prices.length - 1];
+                        } else if (idx >= labels.length) {
+                            const predIdx = futurePredictionLabels.indexOf(label);
+                            return predIdx !== -1 ? futurePredictionData[predIdx] : null;
                         }
-                    ]
-                };
+                        return null;
+                    }),
+                    borderColor: predictionLineGradient,
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    borderWidth: 3,
+                    borderDash: [4, 6],
+                    pointRadius: 0,
+                    tension: 0.2,
+                    spanGaps: true
+                }
+            ]
+        };
         
         // Enhanced options for fullscreen
         const fullscreenOptions = {
@@ -1280,6 +1286,9 @@ function setupFullscreenFeature() {
             },
             plugins: {
                 ...chartOptions.plugins,
+                decimation: {
+                    enabled: false  // Disable decimation for fullscreen to show full history
+                },
                 tooltip: {
                     ...chartOptions.plugins.tooltip,
                     titleFont: {
@@ -1317,23 +1326,19 @@ function setupFullscreenFeature() {
             }
         };
         
-                // Create the fullscreen chart
-                fullscreenChart = new Chart(ctx, {
-                    type: 'line',
-                    data: chartData,
-                    options: fullscreenOptions
-                });
-                
-                // Add double-click to reset zoom on fullscreen chart
-                fullscreenCanvas.addEventListener('dblclick', () => {
-                    if (fullscreenChart) {
-                        fullscreenChart.resetZoom();
-                    }
-                });
-            })
-            .catch(error => {
-                console.error('Error loading fullscreen chart data:', error);
-            });
+        // Create the fullscreen chart
+        fullscreenChart = new Chart(ctx, {
+            type: 'line',
+            data: chartData,
+            options: fullscreenOptions
+        });
+        
+        // Add double-click to reset zoom on fullscreen chart
+        fullscreenCanvas.addEventListener('dblclick', () => {
+            if (fullscreenChart) {
+                fullscreenChart.resetZoom();
+            }
+        });
         
         // Setup time controls for fullscreen
         setupFullscreenTimeControls();
