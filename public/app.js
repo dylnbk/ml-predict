@@ -294,6 +294,7 @@ function formatTime(timestamp, interval) {
     if (interval === '1d') {
         options.month = 'short';
         options.day = 'numeric';
+        options.year = 'numeric';
         delete options.minute;
         delete options.hour;
     } else if (interval === '4h') {
@@ -317,8 +318,9 @@ function formatTimeFullscreen(timestamp, interval) {
     const hour = date.getHours();
     
     if (interval === '1d') {
-        // Format: M/D (e.g., 5/23)
-        return `${month}/${day}`;
+        // Format: M/D/YY (e.g., 5/23/24)
+        const year = date.getFullYear().toString().slice(-2);
+        return `${month}/${day}/${year}`;
     } else if (interval === '4h') {
         // Format: M/D H:00 (e.g., 5/23 14:00)
         return `${month}/${day} ${hour}:00`;
@@ -396,7 +398,7 @@ async function updateChart(symbol, interval, animate = true) {
         // Update chart datasets
         charts[symbol].data.labels = labels;
         charts[symbol].data.datasets = [
-            // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
+            // Actual price data (main dataset) - SOLID GRADIENT LINE 
             {
                 label: symbol,
                 data: prices,
@@ -411,16 +413,42 @@ async function updateChart(symbol, interval, animate = true) {
             {
                 label: `${symbol} Past Predictions`,
                 data: pastPredictionData.length > 0 ?
-                    labels.map(label => {
-                        const idx = pastPredictionLabels.indexOf(label);
-                        return idx !== -1 ? pastPredictionData[idx] : null;
-                    }) : [],
-                borderColor: '#FFFFFF', // White line for past predictions
-                backgroundColor: 'rgba(255, 255, 255, 0.05)', // White fill with low opacity for past predictions
+                    (() => {
+                        // Create a map of timestamps to prediction values for faster lookup
+                        const predictionMap = new Map();
+                        predictions.forEach(pred => {
+                            if (pred.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : 0)) {
+                                predictionMap.set(pred.timestamp, pred.predicted_price);
+                            }
+                        });
+                        
+                        // Map data by matching timestamps instead of formatted labels
+                        const mappedData = data.map(dataPoint => {
+                            return predictionMap.get(dataPoint.open_time) || null;
+                        });
+                        
+                        // Debug logging for 1d timeframe
+                        if (currentInterval === '1d') {
+                            console.log('1d Past Predictions Debug:', {
+                                predictionMapSize: predictionMap.size,
+                                mappedDataLength: mappedData.length,
+                                nonNullValues: mappedData.filter(v => v !== null).length,
+                                mappedData: mappedData.filter(v => v !== null)
+                            });
+                        }
+                        
+                        return mappedData;
+                    })() : [],
+                borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
                 fill: true,
-                borderWidth: 2,
+                borderWidth: 1.5, // Slightly thinner line
                 borderDash: [], // Solid line
-                pointRadius: 0,
+                pointRadius: 2, 
+                pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderWidth: 1,
+                pointHoverRadius: 6,
                 tension: 0.2,
                 spanGaps: true
             },
@@ -440,8 +468,8 @@ async function updateChart(symbol, interval, animate = true) {
                 borderColor: predictionLineGradient,
                 backgroundColor: 'transparent',
                 fill: false,
-                borderWidth: 2,
-                borderDash: [3, 6],
+                borderWidth: 3, // Thicker line for more prominence
+                borderDash: [4, 6], // More prominent dashed pattern
                 pointRadius: 0,
                 tension: 0.2,
                 spanGaps: true
@@ -1177,12 +1205,16 @@ function setupFullscreenFeature() {
                                     const idx = pastPredictionLabels.indexOf(label);
                                     return idx !== -1 ? pastPredictionData[idx] : null;
                                 }) : [],
-                           borderColor: '#FFFFFF', // White line for past predictions
-                           backgroundColor: 'rgba(255, 255, 255, 0.05)', // White fill with low opacity
-                           fill: true,
-                            borderWidth: 2,
+                            borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                            backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                            fill: true,
+                            borderWidth: 1.5, // Slightly thinner line
                             borderDash: [], // Solid line
-                            pointRadius: 0,
+                            pointRadius: 2, 
+                            pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                            pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                            pointBorderWidth: 1,
+                            pointHoverRadius: 6,
                             tension: 0.2,
                             spanGaps: true
                         },
@@ -1202,8 +1234,8 @@ function setupFullscreenFeature() {
                             borderColor: predictionLineGradient,
                             backgroundColor: 'transparent',
                             fill: false,
-                            borderWidth: 2,
-                            borderDash: [3, 6],
+                            borderWidth: 3,
+                            borderDash: [4, 6],
                             pointRadius: 0,
                             tension: 0.2,
                             spanGaps: true
@@ -1605,16 +1637,42 @@ async function updateFullscreenChart(symbol, interval) {
             {
                 label: `${symbol} Past Predictions`,
                 data: pastPredictionData.length > 0 ?
-                    labels.map(label => {
-                        const idx = pastPredictionLabels.indexOf(label);
-                        return idx !== -1 ? pastPredictionData[idx] : null;
-                    }) : [],
-                borderColor: '#FFFFFF', // White line for past predictions
-                backgroundColor: 'rgba(255, 255, 255, 0.05)', // White fill with low opacity for past predictions
+                    (() => {
+                        // Create a map of timestamps to prediction values for faster lookup
+                        const predictionMap = new Map();
+                        predictions.forEach(pred => {
+                            if (pred.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : 0)) {
+                                predictionMap.set(pred.timestamp, pred.predicted_price);
+                            }
+                        });
+                        
+                        // Map data by matching timestamps instead of formatted labels
+                        const mappedData = data.map(dataPoint => {
+                            return predictionMap.get(dataPoint.open_time) || null;
+                        });
+                        
+                        // Debug logging for 1d timeframe (fullscreen)
+                        if (currentInterval === '1d') {
+                            console.log('1d Past Predictions Debug (Fullscreen):', {
+                                predictionMapSize: predictionMap.size,
+                                mappedDataLength: mappedData.length,
+                                nonNullValues: mappedData.filter(v => v !== null).length,
+                                mappedData: mappedData.filter(v => v !== null)
+                            });
+                        }
+                        
+                        return mappedData;
+                    })() : [],
+                borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
                 fill: true,
-                borderWidth: 2,
+                borderWidth: 1.5, // Slightly thinner line
                 borderDash: [], // Solid line
-                pointRadius: 0,
+                pointRadius: 2, 
+                pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderWidth: 1,
+                pointHoverRadius: 6,
                 tension: 0.2,
                 spanGaps: true
             },
@@ -1634,8 +1692,8 @@ async function updateFullscreenChart(symbol, interval) {
                 borderColor: predictionLineGradient,
                 backgroundColor: 'transparent',
                 fill: false,
-                borderWidth: 2,
-                borderDash: [3, 6],
+                borderWidth: 3, // Thicker line for more prominence
+                borderDash: [4, 6], // More prominent dashed pattern
                 pointRadius: 0,
                 tension: 0.2,
                 spanGaps: true
