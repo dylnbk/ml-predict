@@ -12,10 +12,14 @@
  * @param {Object} sentimentData - Market sentiment data
  * @returns {string} Formatted prompt for Gemini
  */
-function formatPredictionPrompt(symbol, interval, klineData, indicators, sentimentData) {
+function formatPredictionPrompt(symbol, interval, klineData, indicators, sentimentData, existingPredictions = [], predictionsCount = 24, nextTimestamp = null) {
   // Calculate interval duration for context
   const intervalHours = interval === '1h' ? 1 : interval === '4h' ? 4 : 24;
-  const predictionHours = intervalHours * 24;
+  const intervalMs = intervalHours * 3600 * 1000;
+  const predictionHours = intervalHours * predictionsCount;
+
+  // Calculate starting timestamp for new predictions
+  const startTimestamp = nextTimestamp || (klineData[klineData.length - 1].timestamp + intervalMs);
 
   // Format historical data
   const historicalPrices = klineData.map(k => ({
@@ -27,6 +31,12 @@ function formatPredictionPrompt(symbol, interval, klineData, indicators, sentime
     volume: k.volume
   }));
 
+  // Format existing future predictions
+  const formattedExistingPredictions = existingPredictions.map(p => ({
+    timestamp: p.target_time,
+    predicted_price: p.predicted_price
+  }));
+
   // Format technical indicators
   const latestIndicators = indicators.length > 0 ? indicators[0] : null;
   
@@ -34,7 +44,7 @@ function formatPredictionPrompt(symbol, interval, klineData, indicators, sentime
   const symbolSentiment = sentimentData?.data?.[symbol] || null;
   const marketSentiment = sentimentData?.data?.marketSentiment || null;
 
-  const prompt = `You are an expert cryptocurrency analyst. Analyze the following data and predict the next 24 ${interval} price points for ${symbol}.
+  const prompt = `You are an expert cryptocurrency analyst. Analyze the following data and predict the next ${predictionsCount} ${interval} price points for ${symbol}.
 
 HISTORICAL DATA (Last 100 ${interval} candles):
 ${JSON.stringify(historicalPrices.slice(-10), null, 2)} // Showing last 10 for brevity
@@ -62,45 +72,55 @@ ${symbolSentiment ? JSON.stringify({
     mentionVolume: symbolSentiment.mentionVolume
   }, null, 2) : 'No specific sentiment available'}
 
+${existingPredictions.length > 0 ? `
+EXISTING FUTURE PREDICTIONS (already generated):
+${JSON.stringify(formattedExistingPredictions, null, 2)}
+` : ''}
+
 ANALYSIS CONTEXT:
 - Current price: $${klineData[klineData.length - 1].close}
 - 24h change: ${calculatePriceChange(klineData)}%
 - Interval: ${interval} (${intervalHours} hour${intervalHours > 1 ? 's' : ''})
-- Predictions needed: 24 ${interval} candles (next ${predictionHours} hours)
+- Existing future predictions: ${existingPredictions.length}
+- NEW predictions needed: ${predictionsCount} ${interval} candles (next ${predictionHours} hours)
+- Starting timestamp for NEW predictions: ${startTimestamp}
 
 INSTRUCTIONS:
 1. Analyze the historical price patterns, volume trends, and technical indicators
 2. Consider the market sentiment and ${symbol}-specific sentiment
-3. Identify support and resistance levels
-4. Factor in momentum and trend direction
-5. Generate realistic price predictions for the next 24 ${interval} periods
+3. ${existingPredictions.length > 0 ? 'Review the existing future predictions to understand the expected trend continuation' : ''}
+4. Identify support and resistance levels
+5. Factor in momentum and trend direction
+6. Generate realistic price predictions for the next ${predictionsCount} ${interval} periods
+7. ${existingPredictions.length > 0 ? 'Ensure your NEW predictions logically continue from the existing predictions' : ''}
 
 CRITICAL REQUIREMENTS:
-- You MUST provide EXACTLY 24 predictions
+- You MUST provide EXACTLY ${predictionsCount} NEW predictions
 - Each prediction must have a timestamp and price
-- Timestamps must be sequential, starting from ${klineData[klineData.length - 1].timestamp + (intervalHours * 3600 * 1000)}
-- Each timestamp must increment by exactly ${intervalHours * 3600 * 1000} milliseconds
-- All 24 predictions must be included in a single response
+- Timestamps must be sequential, starting from ${startTimestamp}
+- Each timestamp must increment by exactly ${intervalMs} milliseconds
+- ${existingPredictions.length > 0 ? 'Your predictions should logically continue the trend from existing predictions' : ''}
+- All ${predictionsCount} predictions must be included in a single response
 
 IMPORTANT: Return ONLY valid JSON in the following format, with no additional text or explanation:
 {
-  "predictions": [
-    {
-      "timestamp": <unix_timestamp_in_milliseconds>,
-      "price": <predicted_close_price>
-    },
-    ... (repeat for all 24 predictions)
-  ]
+ "predictions": [
+   {
+     "timestamp": <unix_timestamp_in_milliseconds>,
+     "price": <predicted_close_price>
+   },
+   ... (repeat for all ${predictionsCount} predictions)
+ ]
 }
 
-Example for first 3 predictions:
+Example for first 3 NEW predictions:
 {
-  "predictions": [
-    {"timestamp": ${klineData[klineData.length - 1].timestamp + (intervalHours * 3600 * 1000)}, "price": <price1>},
-    {"timestamp": ${klineData[klineData.length - 1].timestamp + (2 * intervalHours * 3600 * 1000)}, "price": <price2>},
-    {"timestamp": ${klineData[klineData.length - 1].timestamp + (3 * intervalHours * 3600 * 1000)}, "price": <price3>},
-    ... (continue for all 24 predictions)
-  ]
+ "predictions": [
+   {"timestamp": ${startTimestamp}, "price": <price1>},
+   {"timestamp": ${startTimestamp + intervalMs}, "price": <price2>},
+   {"timestamp": ${startTimestamp + (2 * intervalMs)}, "price": <price3>},
+   ... (continue for all ${predictionsCount} predictions)
+ ]
 }`;
 
   return prompt;
@@ -126,14 +146,14 @@ function calculatePriceChange(klineData) {
  * @param {Object} response - Response from AI model
  * @returns {boolean} True if valid format
  */
-function validatePredictionResponse(response) {
+function validatePredictionResponse(response, expectedCount = 24) {
   if (!response || typeof response !== 'object') return false;
   if (!Array.isArray(response.predictions)) return false;
   if (response.predictions.length === 0) return false;
   
-  // Warn if not exactly 24 predictions but don't fail
-  if (response.predictions.length !== 24) {
-    console.warn(`Warning: Expected 24 predictions but received ${response.predictions.length}`);
+  // Warn if not exactly expected predictions but don't fail
+  if (response.predictions.length !== expectedCount) {
+    console.warn(`Warning: Expected ${expectedCount} predictions but received ${response.predictions.length}`);
   }
   
   return response.predictions.every(pred =>
