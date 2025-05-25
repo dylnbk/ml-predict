@@ -75,17 +75,33 @@ INSTRUCTIONS:
 4. Factor in momentum and trend direction
 5. Generate realistic price predictions for the next 24 ${interval} periods
 
+CRITICAL REQUIREMENTS:
+- You MUST provide EXACTLY 24 predictions
+- Each prediction must have a timestamp and price
+- Timestamps must be sequential, starting from ${klineData[klineData.length - 1].timestamp + (intervalHours * 3600 * 1000)}
+- Each timestamp must increment by exactly ${intervalHours * 3600 * 1000} milliseconds
+- All 24 predictions must be included in a single response
+
 IMPORTANT: Return ONLY valid JSON in the following format, with no additional text or explanation:
 {
   "predictions": [
     {
       "timestamp": <unix_timestamp_in_milliseconds>,
       "price": <predicted_close_price>
-    }
+    },
+    ... (repeat for all 24 predictions)
   ]
 }
 
-The timestamps should start from ${klineData[klineData.length - 1].timestamp + (intervalHours * 3600 * 1000)} and increment by ${intervalHours * 3600 * 1000} milliseconds for each prediction.`;
+Example for first 3 predictions:
+{
+  "predictions": [
+    {"timestamp": ${klineData[klineData.length - 1].timestamp + (intervalHours * 3600 * 1000)}, "price": <price1>},
+    {"timestamp": ${klineData[klineData.length - 1].timestamp + (2 * intervalHours * 3600 * 1000)}, "price": <price2>},
+    {"timestamp": ${klineData[klineData.length - 1].timestamp + (3 * intervalHours * 3600 * 1000)}, "price": <price3>},
+    ... (continue for all 24 predictions)
+  ]
+}`;
 
   return prompt;
 }
@@ -106,16 +122,21 @@ function calculatePriceChange(klineData) {
 }
 
 /**
- * Validates the Gemini response format
- * @param {Object} response - Response from Gemini
+ * Validates the prediction response format
+ * @param {Object} response - Response from AI model
  * @returns {boolean} True if valid format
  */
 function validatePredictionResponse(response) {
   if (!response || typeof response !== 'object') return false;
   if (!Array.isArray(response.predictions)) return false;
-  if (response.predictions.length !== 24) return false;
+  if (response.predictions.length === 0) return false;
   
-  return response.predictions.every(pred => 
+  // Warn if not exactly 24 predictions but don't fail
+  if (response.predictions.length !== 24) {
+    console.warn(`Warning: Expected 24 predictions but received ${response.predictions.length}`);
+  }
+  
+  return response.predictions.every(pred =>
     pred.hasOwnProperty('timestamp') &&
     pred.hasOwnProperty('price') &&
     typeof pred.timestamp === 'number' &&

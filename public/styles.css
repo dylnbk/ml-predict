@@ -4,6 +4,17 @@
     box-sizing: border-box;
 }
 
+/* Chart prediction styles */
+.chart-container {
+    position: relative;
+}
+
+/* Ensure chart.js respects our opacity settings */
+canvas {
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+}
+
 /* Flash animations for price changes */
 @keyframes flash-green {
     0% { color: inherit; }
@@ -160,6 +171,8 @@ body {
 
 .top-navigation {
     margin-bottom: 20px;
+    position: relative; /* Establish stacking context for children */
+    z-index: 10; /* Ensure top navigation itself is above dashboard grid but below modals/fullscreen */
 }
 
 /* Desktop controls container */
@@ -210,7 +223,7 @@ body {
 
 /* Dropdown hover and focus states */
 .dropdown:hover {
-    background-color: rgba(26, 26, 26, 0.7);
+    background-color: rgba(26, 26, 26, 0.7) !important;
     border-color: rgba(255, 255, 255, 0.15);
     box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
 }
@@ -229,7 +242,7 @@ body {
 }
 
 .time-controls,
-.model-controls,
+/* .model-controls, */ /* Temporarily remove .model-controls from this group if it's causing z-index issues with its child dropdown */
 .view-controls {
     display: flex;
     gap: 2px;
@@ -242,6 +255,198 @@ body {
     border-radius: 8px;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
     transition: all 0.3s ease;
+}
+/* Style for the new model dropdown in desktop view */
+.desktop-controls .model-controls .dropdown-wrapper {
+    flex: 0 1 auto; /* Allow it to size based on content, but not grow excessively */
+}
+
+.desktop-controls .model-controls .dropdown {
+    min-width: 120px; /* Adjust as needed for "Gemini" etc. */
+    padding: 8px 12px; /* Slightly less padding than full mobile */
+    padding-right: 35px; /* Ensure space for arrow */
+    font-size: 13px;
+    background-color: rgba(26, 26, 26, 0.6); /* Match tab group background */
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.desktop-controls .model-controls .dropdown:hover {
+    background-color: rgba(26, 26, 26, 0.7);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+
+.desktop-controls .model-controls .dropdown:focus {
+    border-color: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+
+/* Remove the tab group styling from model-controls if it only contains the dropdown */
+.desktop-controls .model-controls {
+    background-color: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: none;
+    padding: 0;
+    box-shadow: none;
+}
+/* Comment out or remove old #desktop-model-select styles */
+/*
+#desktop-model-select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.7)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 16px;
+    cursor: pointer;
+    background-color: rgba(26, 26, 26, 0.6);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+    padding: 8px 12px;
+    padding-right: 35px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    min-width: 150px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+#desktop-model-select:hover {
+    background-color: rgba(26, 26, 26, 0.7);
+    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+    color: #ffffff;
+}
+
+#desktop-model-select:focus {
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1), 0 6px 8px rgba(0, 0, 0, 0.15);
+    color: #ffffff;
+}
+
+#desktop-model-select option {
+    background-color: #1a1a1a;
+    color: #ffffff;
+    padding: 10px 16px;
+    border: none;
+}
+
+#desktop-model-select option:hover {
+    background-color: #333333;
+    color: #ffffff;
+}
+
+#desktop-model-select option:checked {
+    background-color: #2c2c2c !important;
+    color: #ffffff;
+}
+*/
+
+/* Custom Dropdown Styles */
+.custom-dropdown-wrapper {
+    position: relative; /* Needed for absolute positioning of options */
+    z-index: 100; /* Give wrapper a z-index within its parent (.model-controls or .desktop-controls) */
+    /* flex: 0 1 auto; */
+}
+
+.custom-dropdown {
+    /* Mimic .time-controls (tab bar) appearance */
+    background-color: rgba(26, 26, 26, 0.6);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    min-width: 150px; /* Or adjust as needed */
+    position: relative; /* For arrow positioning */
+    user-select: none; /* Prevent text selection */
+}
+
+.custom-dropdown:hover {
+    background-color: rgba(26, 26, 26, 0.7);
+    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: 0 6px 8px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.custom-dropdown:focus,
+.custom-dropdown.open { /* Style when open or focused */
+    outline: none;
+    border-color: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1), 0 6px 8px rgba(0, 0, 0, 0.15);
+}
+
+.custom-dropdown-selected {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px; /* Consistent padding */
+}
+
+.custom-dropdown-arrow {
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid rgba(255, 255, 255, 0.7);
+    transition: transform 0.3s ease;
+}
+
+.custom-dropdown.open .custom-dropdown-arrow {
+    transform: rotate(180deg);
+}
+
+.custom-dropdown-options {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    position: absolute;
+    top: calc(100% + 4px); /* Position below the select box */
+    left: 0;
+    right: 0;
+    background-color: #1a1a1a; /* Dark background for the list */
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-top: none; /* Avoid double border with the main box */
+    border-radius: 0 0 8px 8px; /* Rounded bottom corners */
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    z-index: 2000; /* Ensure it's above other content, increased from 1000 */
+    max-height: 200px; /* Optional: if many options */
+    overflow-y: auto; /* Optional: if many options */
+    display: none; /* Hidden by default */
+}
+
+.custom-dropdown.open .custom-dropdown-options {
+    display: block;
+}
+
+.custom-dropdown-option {
+    padding: 10px 16px;
+    color: #e0e0e0; /* Light gray text */
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+.custom-dropdown-option:hover {
+    background-color: #333333; /* Subtle dark gray for hover */
+    color: #ffffff;
+}
+
+.custom-dropdown-option.selected {
+    background-color: #2c2c2c; /* Subtle dark gray for selected */
+    color: #ffffff;
+    font-weight: 500; /* Slightly bolder for selected */
 }
 
 .time-controls:hover,
@@ -1357,14 +1562,14 @@ body.fullscreen-active {
 }
 
 .news-content a {
-    color: #4A9EFF;
+    color: white;
     text-decoration: none;
     border-bottom: 1px solid rgba(74, 158, 255, 0.3);
     transition: all 0.2s ease;
 }
 
 .news-content a:hover {
-    color: #6BB6FF;
+    color: gray;
     border-bottom-color: rgba(107, 182, 255, 0.5);
 }
 

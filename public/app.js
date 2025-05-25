@@ -27,7 +27,52 @@ const chartOptions = {
             displayColors: false,
             callbacks: {
                 label: function(context) {
-                    return `$${context.parsed.y.toFixed(2)}`;
+                    let datasetLabel = context.dataset.label || '';
+                    const value = context.parsed.y;
+                    const numericValue = (typeof value === 'number' && !isNaN(value)) ? value : 0;
+                    const formattedValue = '$' + numericValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                    if (datasetLabel.endsWith(' Past Predictions')) {
+                        return `Past Pred: ${formattedValue}`;
+                    } else if (datasetLabel.endsWith(' Future Predictions')) {
+                        return `Future Pred: ${formattedValue}`;
+                    } else { // Actual data series (e.g., 'BTC', 'ETH')
+                        return `Actual: ${formattedValue}`;
+                    }
+                }
+            }
+        },
+        zoom: {
+            zoom: {
+                wheel: {
+                    enabled: true,
+                    speed: 0.1,
+                    modifierKey: null
+                },
+                pinch: {
+                    enabled: true
+                },
+                mode: 'xy',
+                drag: {
+                    enabled: true,
+                    backgroundColor: 'rgba(255,255,255,0.1)',
+                    borderColor: 'rgba(255,255,255,0.3)',
+                    borderWidth: 1
+                }
+            },
+            pan: {
+                enabled: true,
+                mode: 'xy',
+                modifierKey: null
+            },
+            limits: {
+                x: {
+                    min: 'original',
+                    max: 'original'
+                },
+                y: {
+                    min: 'original',
+                    max: 'original'
                 }
             }
         }
@@ -230,6 +275,11 @@ function initializeCharts() {
                 }
             }
         });
+        
+        // Add double-click to reset zoom
+        canvas.addEventListener('dblclick', () => {
+            charts[symbol].resetZoom();
+        });
     });
 }
 
@@ -244,6 +294,7 @@ function formatTime(timestamp, interval) {
     if (interval === '1d') {
         options.month = 'short';
         options.day = 'numeric';
+        options.year = 'numeric';
         delete options.minute;
         delete options.hour;
     } else if (interval === '4h') {
@@ -267,8 +318,9 @@ function formatTimeFullscreen(timestamp, interval) {
     const hour = date.getHours();
     
     if (interval === '1d') {
-        // Format: M/D (e.g., 5/23)
-        return `${month}/${day}`;
+        // Format: M/D/YY (e.g., 5/23/24)
+        const year = date.getFullYear().toString().slice(-2);
+        return `${month}/${day}/${year}`;
     } else if (interval === '4h') {
         // Format: M/D H:00 (e.g., 5/23 14:00)
         return `${month}/${day} ${hour}:00`;
@@ -291,6 +343,9 @@ async function updateChart(symbol, interval, animate = true) {
         // Store data for table view
         allCryptoData[symbol] = data;
         
+        // Fetch predictions for the current AI model
+        const predictions = await fetchPredictions(symbol, interval);
+        
         const labels = data.map(k => formatTime(k.open_time, interval));
         const prices = data.map(k => k.close);
         
@@ -299,12 +354,140 @@ async function updateChart(symbol, interval, animate = true) {
         const ctx = canvas.getContext('2d');
         const lineGradient = createLineGradient(ctx, symbol, canvas.height);
         
+        // Create area gradient for actual data
+        const areaGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        areaGradient.addColorStop(0, `${symbolColors[symbol]}10`);
+        areaGradient.addColorStop(1, `${symbolColors[symbol]}00`);
+        
+        // Prepare prediction data
+        let pastPredictionLabels = [];
+        let pastPredictionData = [];
+        let futurePredictionLabels = [];
+        let futurePredictionData = [];
+        
+        if (predictions && predictions.length > 0) {
+            const currentTime = Date.now();
+            const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+            
+            predictions.forEach(pred => {
+                const predLabel = formatTime(pred.timestamp, interval);
+                const predPrice = pred.predicted_price;
+                
+                if (pred.timestamp <= lastHistoricalTime) {
+                    // Past prediction
+                    pastPredictionLabels.push(predLabel);
+                    pastPredictionData.push(predPrice);
+                } else {
+                    // Future prediction
+                    futurePredictionLabels.push(predLabel);
+                    futurePredictionData.push(predPrice);
+                }
+            });
+        }
+        
+        // Create prediction gradients (more subtle)
+        const predictionLineGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        const baseColor = symbolColors[symbol];
+        predictionLineGradient.addColorStop(0, `${baseColor}60`); // 37.5% opacity (increased from 25%)
+        predictionLineGradient.addColorStop(1, `${baseColor}40`); // 25% opacity (increased from 12.5%)
+        
+        const predictionAreaGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        predictionAreaGradient.addColorStop(0, `${baseColor}15`); // 8% opacity (increased from 5%)
+        predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
+        
+        // Update chart datasets
         charts[symbol].data.labels = labels;
-        charts[symbol].data.datasets[0].data = prices;
-        charts[symbol].data.datasets[0].borderColor = lineGradient;
+        charts[symbol].data.datasets = [
+            // Actual price data (main dataset) - SOLID GRADIENT LINE 
+            {
+                label: symbol,
+                data: prices,
+                borderColor: lineGradient,
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 2.5,
+                pointRadius: 0,
+                tension: 0.2
+            },
+            // Past predictions - WITH AREA FILL
+            {
+                label: `${symbol} Past Predictions`,
+                data: pastPredictionData.length > 0 ?
+                    (() => {
+                        // Create a map of timestamps to prediction values for faster lookup
+                        const predictionMap = new Map();
+                        predictions.forEach(pred => {
+                            if (pred.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : 0)) {
+                                predictionMap.set(pred.timestamp, pred.predicted_price);
+                            }
+                        });
+                        
+                        // Map data by matching timestamps instead of formatted labels
+                        const mappedData = data.map(dataPoint => {
+                            return predictionMap.get(dataPoint.open_time) || null;
+                        });
+                        
+                        // Debug logging for 1d timeframe
+                        if (currentInterval === '1d') {
+                            console.log('1d Past Predictions Debug:', {
+                                predictionMapSize: predictionMap.size,
+                                mappedDataLength: mappedData.length,
+                                nonNullValues: mappedData.filter(v => v !== null).length,
+                                mappedData: mappedData.filter(v => v !== null)
+                            });
+                        }
+                        
+                        return mappedData;
+                    })() : [],
+                borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                fill: true,
+                borderWidth: 1.5, // Slightly thinner line
+                borderDash: [], // Solid line
+                pointRadius: 2, 
+                pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderWidth: 1,
+                pointHoverRadius: 6,
+                tension: 0.2,
+                spanGaps: true
+            },
+            // Future predictions - DOTTED LINE NO AREA FILL
+            {
+                label: `${symbol} Future Predictions`,
+                data: labels.concat(futurePredictionLabels).map((label, idx) => {
+                    if (idx === labels.length - 1) {
+                        // Connect to last actual price
+                        return prices[prices.length - 1];
+                    } else if (idx >= labels.length) {
+                        const predIdx = futurePredictionLabels.indexOf(label);
+                        return predIdx !== -1 ? futurePredictionData[predIdx] : null;
+                    }
+                    return null;
+                }),
+                borderColor: predictionLineGradient,
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 3, // Thicker line for more prominence
+                borderDash: [4, 6], // More prominent dashed pattern
+                pointRadius: 0,
+                tension: 0.2,
+                spanGaps: true
+            }
+        ];
+        
+        // Update labels to include future predictions
+        if (futurePredictionLabels.length > 0) {
+            charts[symbol].data.labels = labels.concat(futurePredictionLabels);
+        }
         
         // Use animation for smooth transitions
         charts[symbol].update(animate ? 'active' : 'none');
+        
+        // Reset zoom when updating chart (e.g., when switching intervals)
+        if (charts[symbol].isZoomedOrPanned && charts[symbol].isZoomedOrPanned()) {
+            charts[symbol].resetZoom();
+        }
         
         // Update current price with smooth transition
         const currentPrice = prices[prices.length - 1];
@@ -482,53 +665,190 @@ function setupTimeControls() {
 
 // Setup model controls
 function setupModelControls() {
-    const buttons = document.querySelectorAll('.model-btn');
-    const dropdown = document.getElementById('mobile-model-select');
-    
-    buttons.forEach(button => {
-        button.addEventListener('click', () => {
-            // Update active state
-            buttons.forEach(btn => btn.classList.remove('active'));
-            button.classList.add('active');
+    const customDropdown = document.getElementById('desktop-model-select-custom');
+    const mobileModelSelect = document.getElementById('mobile-model-select'); // Keep for mobile
+
+    const handleModelChange = (selectedValue) => {
+        const newModel = selectedValue.toUpperCase(); // GPT, GEMINI, CLAUDE
+        if (currentAIModel !== newModel) {
+            currentAIModel = newModel;
+            console.log(`AI Model changed to: ${currentAIModel}`);
             
-            // Update current AI model
-            currentAIModel = button.textContent;
-            
-            // Sync with mobile dropdown
-            if (dropdown) {
-                const modelValue = button.textContent.toLowerCase();
-                dropdown.value = modelValue;
-            }
-            
-            // Update table view if it's currently active
-            const tableView = document.getElementById('table-view');
-            if (tableView && tableView.style.display !== 'none') {
+            updateAllCharts(true);
+            if (currentView === 'table') {
                 updateTableView();
             }
+            if (fullscreenChart && currentFullscreenSymbol) {
+                updateFullscreenChart(currentFullscreenSymbol, currentInterval);
+            }
+            const fullscreenTable = document.getElementById('fullscreen-table');
+            if (fullscreenTable.style.display === 'flex' && currentFullscreenSymbol) {
+                updateFullscreenTable(currentFullscreenSymbol);
+            }
+        }
+    };
+
+    if (customDropdown) {
+        const selectedDisplay = customDropdown.querySelector('.custom-dropdown-selected');
+        const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+        const optionsList = customDropdown.querySelector('.custom-dropdown-options');
+        const options = Array.from(customDropdown.querySelectorAll('.custom-dropdown-option'));
+
+        // Set initial selected text based on HTML
+        const initialSelectedOption = options.find(opt => opt.classList.contains('selected'));
+        if (initialSelectedOption) {
+            selectedTextElement.textContent = initialSelectedOption.textContent;
+            // currentAIModel = initialSelectedOption.dataset.value.toUpperCase(); // Set initial model
+        } else if (options.length > 0) { // Fallback to first option if none selected
+            options[0].classList.add('selected');
+            selectedTextElement.textContent = options[0].textContent;
+            // currentAIModel = options[0].dataset.value.toUpperCase();
+        }
+
+
+        selectedDisplay.addEventListener('click', (event) => {
+            event.stopPropagation();
+            customDropdown.classList.toggle('open');
+            optionsList.style.display = customDropdown.classList.contains('open') ? 'block' : 'none';
         });
-    });
-    
-    // Mobile dropdown change handler
-    if (dropdown) {
-        dropdown.addEventListener('change', (e) => {
-            const selectedModel = e.target.value;
-            
-            // Update desktop buttons to match
-            buttons.forEach(btn => {
-                btn.classList.remove('active');
-                if (btn.textContent.toLowerCase() === selectedModel) {
-                    btn.classList.add('active');
-                    // Update current AI model
-                    currentAIModel = btn.textContent;
+        
+        customDropdown.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                customDropdown.classList.toggle('open');
+                optionsList.style.display = customDropdown.classList.contains('open') ? 'block' : 'none';
+                 if(customDropdown.classList.contains('open')) {
+                    options.find(o => o.classList.contains('selected') || o)?.focus();
+                 }
+            } else if (event.key === 'Escape' && customDropdown.classList.contains('open')) {
+                customDropdown.classList.remove('open');
+                optionsList.style.display = 'none';
+                selectedDisplay.focus();
+            } else if (customDropdown.classList.contains('open') && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                event.preventDefault();
+                let currentIndex = options.findIndex(opt => opt === document.activeElement);
+                if (currentIndex === -1) { // If no option is focused, focus the selected one or the first one
+                    currentIndex = options.findIndex(opt => opt.classList.contains('selected'));
+                    if (currentIndex === -1) currentIndex = -1; // Will become 0 after +1 for ArrowDown
+                }
+
+                if (event.key === 'ArrowDown') {
+                    currentIndex = (currentIndex + 1) % options.length;
+                } else { // ArrowUp
+                    currentIndex = (currentIndex - 1 + options.length) % options.length;
+                }
+                options[currentIndex].focus();
+            }
+        });
+
+        options.forEach(option => {
+            option.setAttribute('tabindex', '0'); // Make options focusable
+            option.addEventListener('click', function() {
+                selectOption(this);
+            });
+            option.addEventListener('keydown', function(event) {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    selectOption(this);
                 }
             });
+        });
+        
+        function selectOption(optionElement) {
+            const selectedValue = optionElement.dataset.value;
+            selectedTextElement.textContent = optionElement.textContent;
             
-            // Update table view if it's currently active
-            const tableView = document.getElementById('table-view');
-            if (tableView && tableView.style.display !== 'none') {
-                updateTableView();
+            options.forEach(opt => opt.classList.remove('selected'));
+            optionElement.classList.add('selected');
+
+            customDropdown.classList.remove('open');
+            optionsList.style.display = 'none';
+            selectedDisplay.focus(); // Return focus to the main dropdown element
+
+            handleModelChange(selectedValue);
+
+            if (mobileModelSelect && mobileModelSelect.value !== selectedValue) {
+                mobileModelSelect.value = selectedValue;
+            }
+        }
+
+        document.addEventListener('click', (event) => {
+            if (!customDropdown.contains(event.target) && customDropdown.classList.contains('open')) {
+                customDropdown.classList.remove('open');
+                optionsList.style.display = 'none';
             }
         });
+        
+        // Set initial model from custom dropdown's default selected
+        const initiallySelected = options.find(opt => opt.classList.contains('selected'));
+        if (initiallySelected && !currentAIModel) { // Only set if not already set (e.g. by mobile)
+             currentAIModel = initiallySelected.dataset.value.toUpperCase();
+        } else if (options.length > 0 && !currentAIModel) {
+             currentAIModel = options[0].dataset.value.toUpperCase(); // Fallback
+        }
+
+    }
+
+    if (mobileModelSelect) {
+        mobileModelSelect.addEventListener('change', (event) => {
+            const selectedValue = event.target.value;
+            handleModelChange(selectedValue);
+            if (customDropdown) {
+                const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+                const options = customDropdown.querySelectorAll('.custom-dropdown-option');
+                let found = false;
+                options.forEach(opt => {
+                    if (opt.dataset.value === selectedValue) {
+                        selectedTextElement.textContent = opt.textContent;
+                        opt.classList.add('selected');
+                        found = true;
+                    } else {
+                        opt.classList.remove('selected');
+                    }
+                });
+                 if (!found && options.length > 0) { // Fallback if value not in custom
+                    selectedTextElement.textContent = options[0].textContent;
+                    options[0].classList.add('selected');
+                 }
+            }
+        });
+        // Sync initial state if mobile has a value and custom dropdown doesn't match or isn't set
+        if (mobileModelSelect.value && customDropdown) {
+            const customSelectedValue = customDropdown.querySelector('.custom-dropdown-option.selected')?.dataset.value;
+            if (customSelectedValue !== mobileModelSelect.value) {
+                 const selectedTextElement = customDropdown.querySelector('.custom-dropdown-selected-text');
+                 const options = customDropdown.querySelectorAll('.custom-dropdown-option');
+                 let found = false;
+                 options.forEach(opt => {
+                    if (opt.dataset.value === mobileModelSelect.value) {
+                        selectedTextElement.textContent = opt.textContent;
+                        opt.classList.add('selected');
+                        found = true;
+                    } else {
+                        opt.classList.remove('selected');
+                    }
+                 });
+                 if (!found && options.length > 0) { // Fallback
+                    selectedTextElement.textContent = options[0].textContent;
+                    options[0].classList.add('selected');
+                 }
+                 currentAIModel = mobileModelSelect.value.toUpperCase();
+            }
+        } else if (mobileModelSelect.value && !currentAIModel) {
+            currentAIModel = mobileModelSelect.value.toUpperCase();
+        }
+    }
+     // Final check for initial currentAIModel if it's still default 'GPT' but HTML has other selected
+    if (currentAIModel === 'GPT') {
+        const desktopInitial = document.querySelector('#desktop-model-select-custom .custom-dropdown-option.selected');
+        if (desktopInitial && desktopInitial.dataset.value.toUpperCase() !== 'GPT') {
+            currentAIModel = desktopInitial.dataset.value.toUpperCase();
+        } else {
+            const mobileInitial = document.getElementById('mobile-model-select');
+            if (mobileInitial && mobileInitial.value.toUpperCase() !== 'GPT') {
+                 currentAIModel = mobileInitial.value.toUpperCase();
+            }
+        }
     }
 }
 
@@ -821,19 +1141,106 @@ function setupFullscreenFeature() {
         // Fetch fresh data to get timestamps for proper formatting
         fetch(`/api/klines/${symbol}/${currentInterval}?limit=1000`)
             .then(response => response.json())
-            .then(data => {
+            .then(async data => {
                 const labels = data.map(k => formatTimeFullscreen(k.open_time, currentInterval));
                 const prices = data.map(k => k.close);
                 
+                // Fetch predictions for the current AI model
+                const predictions = await fetchPredictions(symbol, currentInterval);
+                
+                // Prepare prediction data
+                let pastPredictionLabels = [];
+                let pastPredictionData = [];
+                let futurePredictionLabels = [];
+                let futurePredictionData = [];
+                
+                if (predictions && predictions.length > 0) {
+                    const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+                    
+                    predictions.forEach(pred => {
+                        const predLabel = formatTimeFullscreen(pred.timestamp, currentInterval);
+                        const predPrice = pred.predicted_price;
+                        
+                        if (pred.timestamp <= lastHistoricalTime) {
+                            // Past prediction
+                            pastPredictionLabels.push(predLabel);
+                            pastPredictionData.push(predPrice);
+                        } else {
+                            // Future prediction
+                            futurePredictionLabels.push(predLabel);
+                            futurePredictionData.push(predPrice);
+                        }
+                    });
+                }
+                
+                // Create prediction gradients (more subtle)
+                const predictionLineGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
+                const baseColor = symbolColors[symbol];
+                predictionLineGradient.addColorStop(0, `${baseColor}40`); // 25% opacity
+                predictionLineGradient.addColorStop(1, `${baseColor}20`); // 12.5% opacity
+                
+                const predictionAreaGradient = ctx.createLinearGradient(0, 0, 0, fullscreenCanvas.height);
+                predictionAreaGradient.addColorStop(0, `${baseColor}08`); // 5% opacity
+                predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
+                
                 const chartData = {
-                    labels: labels,
-                    datasets: [{
-                        ...sourceChart.data.datasets[0],
-                        data: prices,
-                        borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
-                        backgroundColor: createAreaGradient(ctx, symbol, fullscreenCanvas.height),
-                        borderWidth: 3
-                    }]
+                    labels: futurePredictionLabels.length > 0 ? labels.concat(futurePredictionLabels) : labels,
+                    datasets: [
+                        // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
+                        {
+                            label: symbol,
+                            data: prices,
+                            borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
+                            backgroundColor: 'transparent',
+                            fill: false,
+                            borderWidth: 3,
+                            pointRadius: 0,
+                            tension: 0.2
+                        },
+                        // Past predictions - WITH AREA FILL
+                        {
+                            label: `${symbol} Past Predictions`,
+                            data: pastPredictionData.length > 0 ?
+                                labels.map(label => {
+                                    const idx = pastPredictionLabels.indexOf(label);
+                                    return idx !== -1 ? pastPredictionData[idx] : null;
+                                }) : [],
+                            borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                            backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                            fill: true,
+                            borderWidth: 1.5, // Slightly thinner line
+                            borderDash: [], // Solid line
+                            pointRadius: 2, 
+                            pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                            pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                            pointBorderWidth: 1,
+                            pointHoverRadius: 6,
+                            tension: 0.2,
+                            spanGaps: true
+                        },
+                        // Future predictions - DOTTED LINE NO AREA FILL
+                        {
+                            label: `${symbol} Future Predictions`,
+                            data: labels.concat(futurePredictionLabels).map((label, idx) => {
+                                if (idx === labels.length - 1) {
+                                    // Connect to last actual price
+                                    return prices[prices.length - 1];
+                                } else if (idx >= labels.length) {
+                                    const predIdx = futurePredictionLabels.indexOf(label);
+                                    return predIdx !== -1 ? futurePredictionData[predIdx] : null;
+                                }
+                                return null;
+                            }),
+                            borderColor: predictionLineGradient,
+                            backgroundColor: 'transparent',
+                            fill: false,
+                            borderWidth: 3,
+                            borderDash: [4, 6],
+                            pointRadius: 0,
+                            tension: 0.2,
+                            spanGaps: true
+                        }
+                    ]
                 };
         
         // Enhanced options for fullscreen
@@ -882,6 +1289,26 @@ function setupFullscreenFeature() {
                         size: 14
                     },
                     padding: 12
+                },
+                zoom: {
+                    ...chartOptions.plugins.zoom,
+                    zoom: {
+                        ...chartOptions.plugins.zoom.zoom,
+                        wheel: {
+                            enabled: true,
+                            speed: 0.1,
+                            modifierKey: null
+                        },
+                        pinch: {
+                            enabled: true
+                        },
+                        mode: 'x'
+                    },
+                    pan: {
+                        enabled: true,
+                        mode: 'x',
+                        modifierKey: null
+                    }
                 }
             },
             animation: {
@@ -895,6 +1322,13 @@ function setupFullscreenFeature() {
                     type: 'line',
                     data: chartData,
                     options: fullscreenOptions
+                });
+                
+                // Add double-click to reset zoom on fullscreen chart
+                fullscreenCanvas.addEventListener('dblclick', () => {
+                    if (fullscreenChart) {
+                        fullscreenChart.resetZoom();
+                    }
                 });
             })
             .catch(error => {
@@ -1139,6 +1573,9 @@ async function updateFullscreenChart(symbol, interval) {
         
         if (data.length === 0) return;
         
+        // Fetch predictions for the current AI model
+        const predictions = await fetchPredictions(symbol, interval);
+        
         const labels = data.map(k => formatTimeFullscreen(k.open_time, interval));
         const prices = data.map(k => k.close);
         
@@ -1147,10 +1584,126 @@ async function updateFullscreenChart(symbol, interval) {
         const lineGradient = createLineGradient(ctx, symbol, document.getElementById('fullscreen-canvas').height);
         const areaGradient = createAreaGradient(ctx, symbol, document.getElementById('fullscreen-canvas').height);
         
+        // Prepare prediction data
+        let pastPredictionLabels = [];
+        let pastPredictionData = [];
+        let futurePredictionLabels = [];
+        let futurePredictionData = [];
+        
+        if (predictions && predictions.length > 0) {
+            const lastHistoricalTime = data.length > 0 ? data[data.length - 1].open_time : 0;
+            
+            predictions.forEach(pred => {
+                const predLabel = formatTimeFullscreen(pred.timestamp, interval);
+                const predPrice = pred.predicted_price;
+                
+                if (pred.timestamp <= lastHistoricalTime) {
+                    // Past prediction
+                    pastPredictionLabels.push(predLabel);
+                    pastPredictionData.push(predPrice);
+                } else {
+                    // Future prediction
+                    futurePredictionLabels.push(predLabel);
+                    futurePredictionData.push(predPrice);
+                }
+            });
+        }
+        
+        // Create prediction gradients (more subtle)
+        const predictionLineGradient = ctx.createLinearGradient(0, 0, 0, document.getElementById('fullscreen-canvas').height);
+        const baseColor = symbolColors[symbol];
+        predictionLineGradient.addColorStop(0, `${baseColor}40`); // 25% opacity
+        predictionLineGradient.addColorStop(1, `${baseColor}20`); // 12.5% opacity
+        
+        const predictionAreaGradient = ctx.createLinearGradient(0, 0, 0, document.getElementById('fullscreen-canvas').height);
+        predictionAreaGradient.addColorStop(0, `${baseColor}08`); // 5% opacity
+        predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
+        
+        // Update chart datasets
         fullscreenChart.data.labels = labels;
-        fullscreenChart.data.datasets[0].data = prices;
-        fullscreenChart.data.datasets[0].borderColor = lineGradient;
-        fullscreenChart.data.datasets[0].backgroundColor = areaGradient;
+        fullscreenChart.data.datasets = [
+            // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
+            {
+                label: symbol,
+                data: prices,
+                borderColor: lineGradient,
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 3,
+                pointRadius: 0,
+                tension: 0.2
+            },
+            // Past predictions - WITH AREA FILL
+            {
+                label: `${symbol} Past Predictions`,
+                data: pastPredictionData.length > 0 ?
+                    (() => {
+                        // Create a map of timestamps to prediction values for faster lookup
+                        const predictionMap = new Map();
+                        predictions.forEach(pred => {
+                            if (pred.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : 0)) {
+                                predictionMap.set(pred.timestamp, pred.predicted_price);
+                            }
+                        });
+                        
+                        // Map data by matching timestamps instead of formatted labels
+                        const mappedData = data.map(dataPoint => {
+                            return predictionMap.get(dataPoint.open_time) || null;
+                        });
+                        
+                        // Debug logging for 1d timeframe (fullscreen)
+                        if (currentInterval === '1d') {
+                            console.log('1d Past Predictions Debug (Fullscreen):', {
+                                predictionMapSize: predictionMap.size,
+                                mappedDataLength: mappedData.length,
+                                nonNullValues: mappedData.filter(v => v !== null).length,
+                                mappedData: mappedData.filter(v => v !== null)
+                            });
+                        }
+                        
+                        return mappedData;
+                    })() : [],
+                borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                fill: true,
+                borderWidth: 1.5, // Slightly thinner line
+                borderDash: [], // Solid line
+                pointRadius: 2, 
+                pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderWidth: 1,
+                pointHoverRadius: 6,
+                tension: 0.2,
+                spanGaps: true
+            },
+            // Future predictions - DOTTED LINE NO AREA FILL
+            {
+                label: `${symbol} Future Predictions`,
+                data: labels.concat(futurePredictionLabels).map((label, idx) => {
+                    if (idx === labels.length - 1) {
+                        // Connect to last actual price
+                        return prices[prices.length - 1];
+                    } else if (idx >= labels.length) {
+                        const predIdx = futurePredictionLabels.indexOf(label);
+                        return predIdx !== -1 ? futurePredictionData[predIdx] : null;
+                    }
+                    return null;
+                }),
+                borderColor: predictionLineGradient,
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 3, // Thicker line for more prominence
+                borderDash: [4, 6], // More prominent dashed pattern
+                pointRadius: 0,
+                tension: 0.2,
+                spanGaps: true
+            }
+        ];
+        
+        // Update labels to include future predictions
+        if (futurePredictionLabels.length > 0) {
+            fullscreenChart.data.labels = labels.concat(futurePredictionLabels);
+        }
         
         fullscreenChart.update('active');
         
