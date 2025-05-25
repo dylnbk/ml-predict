@@ -8,7 +8,26 @@ const chartOptions = {
     },
     plugins: {
         legend: {
-            display: false
+            display: true,
+            position: 'bottom',
+            align: 'center',
+            labels: {
+                usePointStyle: true,
+                pointStyle: 'line',
+                font: {
+                    size: 11,
+                    weight: '400'
+                },
+                color: 'rgba(255, 255, 255, 0.7)',
+                padding: 15,
+                boxWidth: 20,
+                boxHeight: 2,
+                filter: function(legendItem, chartData) {
+                    // Only show legend items that have data
+                    const dataset = chartData.datasets[legendItem.datasetIndex];
+                    return dataset && dataset.data && dataset.data.some(point => point !== null && point !== undefined);
+                }
+            }
         },
         decimation: {
             enabled: true,
@@ -402,9 +421,9 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
         // Update chart datasets
         charts[symbol].data.labels = labels;
         charts[symbol].data.datasets = [
-            // Actual price data (main dataset) - SOLID GRADIENT LINE 
+            // Actual price data (main dataset) - SOLID GRADIENT LINE
             {
-                label: symbol,
+                label: 'actual',
                 data: prices,
                 borderColor: lineGradient,
                 backgroundColor: 'transparent',
@@ -415,7 +434,7 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
             },
             // Past predictions - WITH AREA FILL
             {
-                label: `${symbol} Past Predictions`,
+                label: 'pred:past',
                 data: pastPredictionData.length > 0 ?
                     (() => {
                         // Create a map of timestamps to prediction values for faster lookup
@@ -460,7 +479,7 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
             },
             // Future predictions - DOTTED LINE NO AREA FILL
             {
-                label: `${symbol} Future Predictions`,
+                label: 'pred:future',
                 data: labels.concat(futurePredictionLabels).map((label, idx) => {
                     if (idx === labels.length - 1) {
                         // Connect to last actual price
@@ -1194,7 +1213,7 @@ function setupFullscreenFeature() {
             datasets: [
                 // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
                 {
-                    label: symbol,
+                    label: 'actual',
                     data: prices,
                     borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
                     backgroundColor: 'transparent',
@@ -1205,7 +1224,7 @@ function setupFullscreenFeature() {
                 },
                 // Past predictions - WITH AREA FILL
                 {
-                    label: `${symbol} Past Predictions`,
+                    label: 'pred:past',
                     data: pastPredictionData.length > 0 ?
                         labels.map(label => {
                             const idx = pastPredictionLabels.indexOf(label);
@@ -1226,7 +1245,7 @@ function setupFullscreenFeature() {
                 },
                 // Future predictions - DOTTED LINE NO AREA FILL
                 {
-                    label: `${symbol} Future Predictions`,
+                    label: 'pred:future',
                     data: labels.concat(futurePredictionLabels).map((label, idx) => {
                         if (idx === labels.length - 1) {
                             // Connect to last actual price
@@ -1286,6 +1305,28 @@ function setupFullscreenFeature() {
             },
             plugins: {
                 ...chartOptions.plugins,
+                legend: {
+                    display: true,
+                    position: 'bottom',
+                    align: 'center',
+                    labels: {
+                        usePointStyle: true,
+                        pointStyle: 'line',
+                        font: {
+                            size: 12,
+                            weight: '400'
+                        },
+                        color: 'rgba(255, 255, 255, 0.8)',
+                        padding: 20,
+                        boxWidth: 25,
+                        boxHeight: 2,
+                        filter: function(legendItem, chartData) {
+                            // Only show legend items that have data
+                            const dataset = chartData.datasets[legendItem.datasetIndex];
+                            return dataset && dataset.data && dataset.data.some(point => point !== null && point !== undefined);
+                        }
+                    }
+                },
                 decimation: {
                     enabled: false  // Disable decimation for fullscreen to show full history
                 },
@@ -1629,7 +1670,7 @@ async function updateFullscreenChart(symbol, interval) {
         fullscreenChart.data.datasets = [
             // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
             {
-                label: symbol,
+                label: 'actual',
                 data: prices,
                 borderColor: lineGradient,
                 backgroundColor: 'transparent',
@@ -1640,7 +1681,7 @@ async function updateFullscreenChart(symbol, interval) {
             },
             // Past predictions - WITH AREA FILL
             {
-                label: `${symbol} Past Predictions`,
+                label: 'pred:past',
                 data: pastPredictionData.length > 0 ?
                     (() => {
                         // Create a map of timestamps to prediction values for faster lookup
@@ -1683,7 +1724,7 @@ async function updateFullscreenChart(symbol, interval) {
             },
             // Future predictions - DOTTED LINE NO AREA FILL
             {
-                label: `${symbol} Future Predictions`,
+                label: 'pred:future',
                 data: labels.concat(futurePredictionLabels).map((label, idx) => {
                     if (idx === labels.length - 1) {
                         // Connect to last actual price
