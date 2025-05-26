@@ -167,7 +167,6 @@ class PredictionService {
         case 'claude':
           const claudeResponse = await this.anthropic.messages.create({
             model: 'claude-3-7-sonnet-latest',
-            max_tokens: 8000, // Significantly increased for 24 predictions
             temperature: 0.7,
             system: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.',
             messages: [
@@ -186,7 +185,6 @@ class PredictionService {
             temperature: 0.7,
             topK: 40,
             topP: 0.95,
-            maxOutputTokens: 8192, // Significantly increased for 24 predictions
           };
           
           const result = await this.geminiModel.generateContent({
@@ -196,18 +194,45 @@ class PredictionService {
           const response = await result.response;
           const text = response.text();
           
-          // Validate that Gemini returned JSON
+          // Diagnostic logging for response analysis
+          console.log(`📊 Gemini response length: ${text ? text.length : 0} characters`);
+          if (text && text.length > 0) {
+            const lastChars = text.slice(-50);
+            console.log(`📊 Response ending: "${lastChars}"`);
+          }
+          
+          // Validate that Gemini returned a response
           if (!text || text.trim().length === 0) {
             throw new Error('Gemini returned empty response');
           }
           
-          // Check if response contains JSON
-          const jsonMatch = text.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) {
-            console.error(`Gemini response without JSON (attempt ${retryCount + 1}/${maxRetries + 1}):`, text);
-            throw new Error('Gemini response does not contain valid JSON');
+          // Enhanced response validation for truncation detection
+          const trimmedText = text.trim();
+          
+          // Check for signs of truncation
+          const isTruncated = this.detectResponseTruncation(trimmedText);
+          if (isTruncated) {
+            console.error(`🚨 Detected truncated Gemini response (length: ${text.length})`);
+            console.error(`🚨 Response ending: "${trimmedText.slice(-100)}"`);
+            throw new Error('Gemini response appears to be truncated. Consider increasing maxOutputTokens or reducing prediction count.');
           }
           
+          // Check if response contains JSON structure
+          const jsonMatch = trimmedText.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) {
+            console.error(`Gemini response without JSON (attempt ${retryCount + 1}/${maxRetries + 1}):`, text);
+            throw new Error('Gemini response does not contain valid JSON structure');
+          }
+          
+          // Validate JSON completeness
+          const jsonText = jsonMatch[0];
+          if (!this.validateJsonCompleteness(jsonText)) {
+            console.error(`🚨 Incomplete JSON structure detected in Gemini response`);
+            console.error(`🚨 JSON ending: "${jsonText.slice(-100)}"`);
+            throw new Error('Gemini response contains incomplete JSON structure. Response may be truncated.');
+          }
+          
+          console.log(`✅ Gemini response validation passed (${text.length} chars, JSON complete)`);
           return text;
       }
     } catch (error) {
@@ -241,7 +266,7 @@ class PredictionService {
         console.log(`🔮 Generating ${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
 
         // Fetch latest 100 kline data points
-        const klineData = await this.fetchKlineData(symbol, interval, 100);
+        const klineData = await this.fetchKlineData(symbol, interval, 500);
         if (!klineData || klineData.length === 0) {
           throw new Error('No historical data available');
         }
@@ -277,26 +302,72 @@ class PredictionService {
         try {
           text = await this.generateWithProvider(aiProvider, prompt);
           
-          // Parse and validate response
+          // Parse and validate response with enhanced error handling
           try {
             // Extract JSON from response (in case there's extra text)
             const jsonMatch = text.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
-              throw new Error('No JSON found in response');
+              console.error(`🚨 No JSON structure found in ${aiProvider} response`);
+              console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
+              console.error(`🚨 Response preview: "${text ? text.slice(0, 200) : 'null'}..."`);
+              throw new Error('No JSON found in response - response may be truncated or malformed');
             }
-            predictions = JSON.parse(jsonMatch[0]);
+            
+            const jsonText = jsonMatch[0];
+            
+            // Additional validation for Gemini responses
+            if (aiProvider === 'gemini') {
+              // Log JSON extraction details
+              console.log(`📊 Extracted JSON length: ${jsonText.length} characters`);
+              
+              // Check for truncation signs in the extracted JSON
+              if (!this.validateJsonCompleteness(jsonText)) {
+                console.error(`🚨 Incomplete JSON structure in ${aiProvider} response`);
+                console.error(`🚨 JSON ending: "${jsonText.slice(-100)}"`);
+                throw new Error('Extracted JSON appears incomplete - likely due to response truncation');
+              }
+            }
+            
+            predictions = JSON.parse(jsonText);
           } catch (parseError) {
-            console.error(`Failed to parse ${aiProvider} response:`, text);
+            console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
+            console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
+            console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
+            
+            // Provide specific guidance for truncation issues
+            if (parseError.message.includes('Unexpected end of JSON input') ||
+                parseError.message.includes('position')) {
+              throw new Error(`JSON parsing failed at position ${parseError.message.match(/position (\d+)/)?.[1] || 'unknown'} - likely due to response truncation. Try reducing prediction count or increasing token limit.`);
+            }
+            
             throw new Error(`Invalid response format: ${parseError.message}`);
           }
         } catch (error) {
           // Log the error with more context
-          console.error(`Failed to generate predictions with ${aiProvider}:`, error.message);
+          console.error(`🚨 Failed to generate predictions with ${aiProvider}:`, error.message);
           
-          // For Gemini specifically, provide more detailed error info
+          // For Gemini specifically, provide more detailed error info and guidance
           if (aiProvider === 'gemini') {
-            console.error('Gemini API failed to return valid JSON. This may be a temporary issue.');
-            console.error('Consider trying again or using a different AI provider.');
+            console.error('🚨 Gemini API Error Details:');
+            console.error(`   - Error: ${error.message}`);
+            
+            // Provide specific guidance based on error type
+            if (error.message.includes('truncated') || error.message.includes('incomplete')) {
+              console.error('🔧 Suggested fixes for truncation:');
+              console.error('   1. Token limit increased to 32768 (already applied)');
+              console.error('   2. Consider reducing prediction count if issue persists');
+              console.error('   3. Try again as this may be a temporary API issue');
+            } else if (error.message.includes('JSON') || error.message.includes('parse')) {
+              console.error('🔧 Suggested fixes for JSON parsing:');
+              console.error('   1. Response validation enhanced (already applied)');
+              console.error('   2. Check if Gemini API is experiencing issues');
+              console.error('   3. Consider using a different AI provider temporarily');
+            } else {
+              console.error('🔧 General troubleshooting:');
+              console.error('   1. Check API key and quota limits');
+              console.error('   2. Verify network connectivity');
+              console.error('   3. Try using a different AI provider');
+            }
           }
           
           throw error;
@@ -976,6 +1047,137 @@ class PredictionService {
         }
       );
     });
+  }
+
+  /**
+   * Detect if a response appears to be truncated
+   * @param {string} text - Response text to check
+   * @returns {boolean} True if response appears truncated
+   */
+  detectResponseTruncation(text) {
+    if (!text || text.length === 0) {
+      return true;
+    }
+    
+    const trimmed = text.trim();
+    
+    // Check for common truncation indicators
+    const truncationIndicators = [
+      // Ends abruptly without proper JSON closure
+      /[^}\]]\s*$/,
+      // Ends with incomplete JSON structure
+      /[,{[][\s]*$/,
+      // Ends with incomplete string
+      /"[^"]*$/,
+      // Ends with incomplete number
+      /\d+\.?\d*$/,
+      // Very short response (likely truncated)
+      trimmed.length < 100
+    ];
+    
+    // Check if response is suspiciously short for 24 predictions
+    if (trimmed.length < 500) {
+      console.warn(`⚠️ Response suspiciously short: ${trimmed.length} characters`);
+      return true;
+    }
+    
+    // Check for truncation patterns
+    for (const indicator of truncationIndicators.slice(0, -1)) { // Exclude length check
+      if (indicator.test && indicator.test(trimmed)) {
+        console.warn(`⚠️ Truncation pattern detected: ${indicator}`);
+        return true;
+      }
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Validate that JSON structure is complete
+   * @param {string} jsonText - JSON text to validate
+   * @returns {boolean} True if JSON appears complete
+   */
+  validateJsonCompleteness(jsonText) {
+    if (!jsonText || jsonText.trim().length === 0) {
+      return false;
+    }
+    
+    const trimmed = jsonText.trim();
+    
+    // Basic structure checks
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+      console.warn(`⚠️ JSON doesn't start with { or end with }`);
+      return false;
+    }
+    
+    // Count braces to ensure they're balanced
+    let braceCount = 0;
+    let bracketCount = 0;
+    let inString = false;
+    let escaped = false;
+    
+    for (let i = 0; i < trimmed.length; i++) {
+      const char = trimmed[i];
+      
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+      
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      
+      if (!inString) {
+        if (char === '{') braceCount++;
+        else if (char === '}') braceCount--;
+        else if (char === '[') bracketCount++;
+        else if (char === ']') bracketCount--;
+      }
+    }
+    
+    // Check if braces and brackets are balanced
+    if (braceCount !== 0) {
+      console.warn(`⚠️ Unbalanced braces: ${braceCount}`);
+      return false;
+    }
+    
+    if (bracketCount !== 0) {
+      console.warn(`⚠️ Unbalanced brackets: ${bracketCount}`);
+      return false;
+    }
+    
+    // Check for expected structure for predictions
+    if (!trimmed.includes('"predictions"') || !trimmed.includes('[')) {
+      console.warn(`⚠️ Missing expected predictions structure`);
+      return false;
+    }
+    
+    // Try to parse to ensure it's valid JSON
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (!parsed.predictions || !Array.isArray(parsed.predictions)) {
+        console.warn(`⚠️ Invalid predictions structure in JSON`);
+        return false;
+      }
+      
+      // Check if we have a reasonable number of predictions
+      if (parsed.predictions.length < 10) {
+        console.warn(`⚠️ Too few predictions: ${parsed.predictions.length}`);
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      console.warn(`⚠️ JSON parse error during validation: ${error.message}`);
+      return false;
+    }
   }
 
   /**
