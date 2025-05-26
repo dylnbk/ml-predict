@@ -168,6 +168,7 @@ class PredictionService {
           const claudeResponse = await this.anthropic.messages.create({
             model: 'claude-3-7-sonnet-latest',
             temperature: 0.7,
+            max_tokens: 12000,
             system: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.',
             messages: [
               {
@@ -185,6 +186,7 @@ class PredictionService {
             temperature: 0.7,
             topK: 40,
             topP: 0.95,
+            maxOutputTokens: 60000
           };
           
           const result = await this.geminiModel.generateContent({
@@ -212,9 +214,20 @@ class PredictionService {
           // Check for signs of truncation
           const isTruncated = this.detectResponseTruncation(trimmedText);
           if (isTruncated) {
-            console.error(`🚨 Detected truncated Gemini response (length: ${text.length})`);
-            console.error(`🚨 Response ending: "${trimmedText.slice(-100)}"`);
-            throw new Error('Gemini response appears to be truncated. Consider increasing maxOutputTokens or reducing prediction count.');
+            console.warn(`⚠️ Detected truncated Gemini response (length: ${text.length})`);
+            console.warn(`⚠️ Response ending: "${trimmedText.slice(-100)}"`);
+            console.log('🔧 Attempting to extract partial predictions from truncated response...');
+            
+            // Try to extract partial predictions instead of failing
+            const partialPredictions = this.extractPartialPredictions(trimmedText);
+            if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
+              console.log(`✅ Successfully extracted ${partialPredictions.predictions.length} predictions from truncated response`);
+              // Continue with the extracted predictions - don't throw an error
+              return trimmedText; // Return the original text so the normal parsing flow can handle the extracted data
+            } else {
+              console.error(`❌ Could not extract any valid predictions from truncated response`);
+              throw new Error(`Gemini response is truncated and no valid predictions could be extracted. Response length: ${text.length} characters.`);
+            }
           }
           
           // Check if response contains JSON structure
@@ -310,37 +323,85 @@ class PredictionService {
               console.error(`🚨 No JSON structure found in ${aiProvider} response`);
               console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
               console.error(`🚨 Response preview: "${text ? text.slice(0, 200) : 'null'}..."`);
-              throw new Error('No JSON found in response - response may be truncated or malformed');
-            }
-            
-            const jsonText = jsonMatch[0];
-            
-            // Additional validation for Gemini responses
-            if (aiProvider === 'gemini') {
-              // Log JSON extraction details
-              console.log(`📊 Extracted JSON length: ${jsonText.length} characters`);
               
-              // Check for truncation signs in the extracted JSON
-              if (!this.validateJsonCompleteness(jsonText)) {
-                console.error(`🚨 Incomplete JSON structure in ${aiProvider} response`);
-                console.error(`🚨 JSON ending: "${jsonText.slice(-100)}"`);
-                throw new Error('Extracted JSON appears incomplete - likely due to response truncation');
+              // For Gemini, try to extract partial predictions as last resort
+              if (aiProvider === 'gemini') {
+                console.log('🔧 Attempting to extract partial predictions from malformed response...');
+                const partialPredictions = this.extractPartialPredictions(text);
+                if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
+                  console.log(`✅ Extracted ${partialPredictions.predictions.length} predictions from malformed response`);
+                  predictions = partialPredictions;
+                } else {
+                  throw new Error('No JSON found in response and no partial predictions could be extracted');
+                }
+              } else {
+                throw new Error('No JSON found in response - response may be truncated or malformed');
+              }
+            } else {
+              const jsonText = jsonMatch[0];
+              
+              // Additional validation for Gemini responses
+              if (aiProvider === 'gemini') {
+                // Log JSON extraction details
+                console.log(`📊 Extracted JSON length: ${jsonText.length} characters`);
+                
+                // Check for truncation signs in the extracted JSON
+                if (!this.validateJsonCompleteness(jsonText)) {
+                  console.warn(`⚠️ Incomplete JSON structure in ${aiProvider} response`);
+                  console.warn(`⚠️ JSON ending: "${jsonText.slice(-100)}"`);
+                  console.log('🔧 Attempting to extract partial predictions from incomplete JSON...');
+                  
+                  // Try to extract partial predictions instead of failing
+                  const partialPredictions = this.extractPartialPredictions(text);
+                  if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
+                    console.log(`✅ Extracted ${partialPredictions.predictions.length} predictions from incomplete JSON`);
+                    predictions = partialPredictions;
+                  } else {
+                    throw new Error('Extracted JSON appears incomplete and no partial predictions could be extracted');
+                  }
+                } else {
+                  predictions = JSON.parse(jsonText);
+                }
+              } else {
+                predictions = JSON.parse(jsonText);
               }
             }
-            
-            predictions = JSON.parse(jsonText);
           } catch (parseError) {
-            console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
-            console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
-            console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
-            
-            // Provide specific guidance for truncation issues
-            if (parseError.message.includes('Unexpected end of JSON input') ||
-                parseError.message.includes('position')) {
-              throw new Error(`JSON parsing failed at position ${parseError.message.match(/position (\d+)/)?.[1] || 'unknown'} - likely due to response truncation. Try reducing prediction count or increasing token limit.`);
+            // If we haven't already tried partial extraction for Gemini, try it now
+            if (aiProvider === 'gemini' && !predictions) {
+              console.warn(`⚠️ JSON parsing failed for ${aiProvider}:`, parseError.message);
+              console.log('🔧 Final attempt: extracting partial predictions...');
+              
+              const partialPredictions = this.extractPartialPredictions(text);
+              if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
+                console.log(`✅ Final extraction successful: ${partialPredictions.predictions.length} predictions`);
+                predictions = partialPredictions;
+              } else {
+                console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
+                console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
+                console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
+                
+                // Provide specific guidance for truncation issues
+                if (parseError.message.includes('Unexpected end of JSON input') ||
+                    parseError.message.includes('position')) {
+                  throw new Error(`JSON parsing failed and no partial predictions could be extracted. Original error: ${parseError.message}`);
+                }
+                
+                throw new Error(`Invalid response format and no partial predictions could be extracted: ${parseError.message}`);
+              }
+            } else {
+              console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
+              console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
+              console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
+              
+              // Provide specific guidance for truncation issues
+              if (parseError.message.includes('Unexpected end of JSON input') ||
+                  parseError.message.includes('position')) {
+                throw new Error(`JSON parsing failed at position ${parseError.message.match(/position (\d+)/)?.[1] || 'unknown'} - likely due to response truncation. Try reducing prediction count or increasing token limit.`);
+              }
+              
+              throw new Error(`Invalid response format: ${parseError.message}`);
             }
-            
-            throw new Error(`Invalid response format: ${parseError.message}`);
           }
         } catch (error) {
           // Log the error with more context
@@ -392,13 +453,17 @@ class PredictionService {
         }
         
         // Check if we got the expected number of predictions
-        if (predictions.predictions.length < predictionsCount) {
-          console.warn(`⚠️ ${aiProvider} returned only ${predictions.predictions.length} predictions instead of ${predictionsCount} for ${symbol} (${interval})`);
+        const actualCount = predictions.predictions.length;
+        if (actualCount < predictionsCount) {
+          const percentage = Math.round((actualCount / predictionsCount) * 100);
+          console.warn(`⚠️ ${aiProvider} returned ${actualCount}/${predictionsCount} predictions (${percentage}%) for ${symbol} (${interval})`);
           
-          // If we got less than 80% of requested predictions, consider it a failure and retry
-          const minAcceptable = Math.ceil(predictionsCount * 0.8);
-          if (predictions.predictions.length < minAcceptable) {
-            throw new Error(`Insufficient predictions returned: ${predictions.predictions.length}/${predictionsCount}`);
+          // For partial extractions, be more lenient with the minimum threshold
+          const minAcceptable = Math.ceil(predictionsCount * 0.5); // Reduced from 80% to 50%
+          if (actualCount < minAcceptable) {
+            throw new Error(`Insufficient predictions returned: ${actualCount}/${predictionsCount} (minimum ${minAcceptable} required)`);
+          } else {
+            console.log(`✅ Accepting ${actualCount} predictions (above minimum threshold of ${minAcceptable})`);
           }
         }
 
@@ -406,7 +471,13 @@ class PredictionService {
         const predictionTime = Date.now();
         await this.storePredictions(symbol, interval, predictionTime, predictions.predictions, aiProvider);
 
-        console.log(`✅ Generated ${predictions.predictions.length} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`);
+        const finalCount = predictions.predictions.length;
+        const isPartial = finalCount < predictionsCount;
+        const statusMessage = isPartial
+          ? `✅ Extracted ${finalCount}/${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()} (partial due to truncation)`
+          : `✅ Generated ${finalCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`;
+        
+        console.log(statusMessage);
         
         return {
           success: true,
@@ -414,7 +485,10 @@ class PredictionService {
           interval,
           aiProvider,
           predictionTime,
-          predictions: predictions.predictions
+          predictions: predictions.predictions,
+          isPartial: isPartial,
+          requestedCount: predictionsCount,
+          actualCount: finalCount
         };
 
       } catch (error) {
@@ -1177,6 +1251,151 @@ class PredictionService {
     } catch (error) {
       console.warn(`⚠️ JSON parse error during validation: ${error.message}`);
       return false;
+    }
+  }
+
+  /**
+   * Extract partial predictions from a potentially truncated response
+   * @param {string} text - The response text (potentially truncated)
+   * @returns {Object|null} Extracted predictions object or null if none found
+   */
+  extractPartialPredictions(text) {
+    if (!text || text.trim().length === 0) {
+      return null;
+    }
+
+    try {
+      // First try to find a complete JSON structure
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn('⚠️ No JSON structure found in response');
+        return null;
+      }
+
+      let jsonText = jsonMatch[0];
+      
+      // Try parsing as-is first
+      try {
+        const parsed = JSON.parse(jsonText);
+        if (parsed.predictions && Array.isArray(parsed.predictions)) {
+          console.log(`✅ Successfully extracted ${parsed.predictions.length} complete predictions`);
+          return parsed;
+        }
+      } catch (parseError) {
+        console.log('📝 Initial JSON parse failed, attempting repair...');
+      }
+
+      // If parsing failed, try to repair truncated JSON
+      const repairedJson = this.repairTruncatedJson(jsonText);
+      if (repairedJson) {
+        try {
+          const parsed = JSON.parse(repairedJson);
+          if (parsed.predictions && Array.isArray(parsed.predictions) && parsed.predictions.length > 0) {
+            console.log(`✅ Successfully extracted ${parsed.predictions.length} predictions from repaired JSON`);
+            return parsed;
+          }
+        } catch (repairParseError) {
+          console.warn('⚠️ Failed to parse repaired JSON:', repairParseError.message);
+        }
+      }
+
+      // Last resort: try to extract individual prediction objects
+      const extractedPredictions = this.extractIndividualPredictions(text);
+      if (extractedPredictions && extractedPredictions.length > 0) {
+        console.log(`✅ Extracted ${extractedPredictions.length} individual predictions`);
+        return { predictions: extractedPredictions };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('❌ Error extracting partial predictions:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Attempt to repair truncated JSON by fixing common issues
+   * @param {string} jsonText - Potentially truncated JSON
+   * @returns {string|null} Repaired JSON or null if repair failed
+   */
+  repairTruncatedJson(jsonText) {
+    try {
+      let repaired = jsonText.trim();
+
+      // Remove any trailing incomplete elements
+      // Look for the last complete prediction object
+      const predictionMatches = [...repaired.matchAll(/\{[^{}]*"timestamp"[^{}]*"price"[^{}]*\}/g)];
+      if (predictionMatches.length === 0) {
+        return null;
+      }
+
+      // Find the position after the last complete prediction
+      const lastMatch = predictionMatches[predictionMatches.length - 1];
+      const lastCompletePos = lastMatch.index + lastMatch[0].length;
+
+      // Extract everything up to the last complete prediction
+      let truncatedAtLastComplete = repaired.substring(0, lastCompletePos);
+
+      // Check if we need to close the predictions array
+      if (!truncatedAtLastComplete.includes(']')) {
+        truncatedAtLastComplete += ']';
+      }
+
+      // Check if we need to close the main object
+      if (!truncatedAtLastComplete.endsWith('}')) {
+        truncatedAtLastComplete += '}';
+      }
+
+      // Validate the structure makes sense
+      if (truncatedAtLastComplete.includes('"predictions"') && 
+          truncatedAtLastComplete.includes('[') && 
+          truncatedAtLastComplete.includes(']')) {
+        return truncatedAtLastComplete;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn('⚠️ Error repairing JSON:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Extract individual prediction objects from text
+   * @param {string} text - Response text
+   * @returns {Array} Array of prediction objects
+   */
+  extractIndividualPredictions(text) {
+    try {
+      const predictions = [];
+      
+      // Look for individual prediction objects with timestamp and price
+      const predictionRegex = /\{[^{}]*"timestamp"[^{}]*"price"[^{}]*\}/g;
+      const matches = text.match(predictionRegex);
+      
+      if (!matches) {
+        return [];
+      }
+
+      for (const match of matches) {
+        try {
+          const prediction = JSON.parse(match);
+          if (prediction.timestamp && prediction.price && 
+              typeof prediction.timestamp === 'number' && 
+              typeof prediction.price === 'number' && 
+              prediction.price > 0) {
+            predictions.push(prediction);
+          }
+        } catch (parseError) {
+          // Skip invalid prediction objects
+          continue;
+        }
+      }
+
+      return predictions;
+    } catch (error) {
+      console.warn('⚠️ Error extracting individual predictions:', error.message);
+      return [];
     }
   }
 
