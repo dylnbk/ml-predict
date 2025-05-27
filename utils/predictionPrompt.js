@@ -44,10 +44,7 @@ function formatPredictionPrompt(symbol, interval, klineData, indicators, sentime
   const symbolSentiment = sentimentData?.data?.[symbol] || null;
   const marketSentiment = sentimentData?.data?.marketSentiment || null;
 
-  const prompt = `You are an expert cryptocurrency analyst. Analyze the following data and predict the next ${predictionsCount} ${interval} price points for ${symbol}.
-
-HISTORICAL DATA (Last 100 ${interval} candles):
-${JSON.stringify(historicalPrices.slice(-10), null, 2)} // Showing last 10 for brevity
+  const prompt = `You are an expert financial analyst. Analyze the following data and predict the next ${predictionsCount} ${interval} price points.
 
 TECHNICAL INDICATORS (Latest):
 ${latestIndicators ? JSON.stringify({
@@ -59,24 +56,6 @@ ${latestIndicators ? JSON.stringify({
     MACD_Histogram: latestIndicators.macd_histogram
   }, null, 2) : 'No indicators available'}
 
-MARKET SENTIMENT:
-${marketSentiment ? JSON.stringify({
-    fearGreedIndex: marketSentiment.value,
-    classification: marketSentiment.classification
-  }, null, 2) : 'No market sentiment available'}
-
-${symbol} SPECIFIC SENTIMENT:
-${symbolSentiment ? JSON.stringify({
-    sentiment: symbolSentiment.sentiment,
-    sentimentScore: symbolSentiment.sentimentScore,
-    mentionVolume: symbolSentiment.mentionVolume
-  }, null, 2) : 'No specific sentiment available'}
-
-${existingPredictions.length > 0 ? `
-EXISTING FUTURE PREDICTIONS (already generated):
-${JSON.stringify(formattedExistingPredictions, null, 2)}
-` : ''}
-
 ANALYSIS CONTEXT:
 - Current price: $${klineData[klineData.length - 1].close}
 - 24h change: ${calculatePriceChange(klineData)}%
@@ -86,20 +65,19 @@ ANALYSIS CONTEXT:
 - Starting timestamp for NEW predictions: ${startTimestamp}
 
 INSTRUCTIONS:
-1. Analyze the historical price patterns, volume trends, and technical indicators
-2. Consider the market sentiment and ${symbol}-specific sentiment
-3. ${existingPredictions.length > 0 ? 'Review the existing future predictions to understand the expected trend continuation' : ''}
-4. Identify support and resistance levels
-5. Factor in momentum and trend direction
-6. Generate realistic price predictions for the next ${predictionsCount} ${interval} periods
-7. ${existingPredictions.length > 0 ? 'Ensure your NEW predictions logically continue from the existing predictions' : ''}
+- Analyze the historical price patterns, volume trends, and technical indicators
+- ${existingPredictions.length > 0 ? 'Review the existing future predictions to understand the expected trend continuation' : ''}
+- Identify support and resistance levels
+- Factor in momentum and trend direction
+- Generate realistic and natural price predictions for the next ${predictionsCount} ${interval} periods
+- ${existingPredictions.length > 0 ? 'Ensure your NEW predictions logically continue from the existing predictions' : ''}
 
 CRITICAL REQUIREMENTS:
 - You MUST provide EXACTLY ${predictionsCount} NEW predictions
 - Each prediction must have a timestamp and price
 - Timestamps must be sequential, starting from ${startTimestamp}
 - Each timestamp must increment by exactly ${intervalMs} milliseconds
-- ${existingPredictions.length > 0 ? 'Your predictions should logically continue the trend from existing predictions' : ''}
+- ${existingPredictions.length > 0 ? 'Your predictions should logically consider existing predictions, pivoting if required' : ''}
 - All ${predictionsCount} predictions must be included in a single response
 
 IMPORTANT: Return ONLY valid JSON in the following format, with no additional text or explanation:
@@ -113,15 +91,13 @@ IMPORTANT: Return ONLY valid JSON in the following format, with no additional te
  ]
 }
 
-Example for first 3 NEW predictions:
-{
- "predictions": [
-   {"timestamp": ${startTimestamp}, "price": <price1>},
-   {"timestamp": ${startTimestamp + intervalMs}, "price": <price2>},
-   {"timestamp": ${startTimestamp + (2 * intervalMs)}, "price": <price3>},
-   ... (continue for all ${predictionsCount} predictions)
- ]
-}`;
+HISTORICAL DATA (Last 100 ${interval} candles):
+${JSON.stringify(historicalPrices.slice(-100), null, 2)}
+
+${existingPredictions.length > 0 ? `
+EXISTING FUTURE PREDICTIONS (already generated):
+${JSON.stringify(formattedExistingPredictions, null, 2)}
+` : ''}`;
 
   return prompt;
 }
