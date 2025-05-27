@@ -44,7 +44,7 @@ function formatPredictionPrompt(symbol, interval, klineData, indicators, sentime
   const symbolSentiment = sentimentData?.data?.[symbol] || null;
   const marketSentiment = sentimentData?.data?.marketSentiment || null;
 
-  const prompt = `You are an expert financial analyst. Analyze the following data and predict the next ${predictionsCount} ${interval} price points.
+  const prompt = `You are an expert financial analyst. Time series forecast the following data and predict the next ${predictionsCount} ${interval} price points.
 
 TECHNICAL INDICATORS (Latest):
 ${latestIndicators ? JSON.stringify({
@@ -80,7 +80,7 @@ CRITICAL REQUIREMENTS:
 - ${existingPredictions.length > 0 ? 'Your predictions should logically consider existing predictions, pivoting if required' : ''}
 - All ${predictionsCount} predictions must be included in a single response
 
-IMPORTANT: Return ONLY valid JSON in the following format, with no additional text or explanation:
+IMPORTANT: Return ONLY valid JSON in the following format, with realistic forecasting containing no additional text or explanation:
 {
  "predictions": [
    {
