@@ -751,7 +751,7 @@ app.get('/api/predictions/accuracy/:symbol/:interval', async (req, res) => {
 
 // Manually trigger prediction generation (for testing)
 app.post('/api/predictions/generate', async (req, res) => {
-  const { symbol, interval } = req.body;
+  const { symbol, interval, aiProvider } = req.body;
   
   // Validate input
   if (!symbol || !SYMBOLS.includes(symbol)) {
@@ -768,10 +768,20 @@ app.post('/api/predictions/generate', async (req, res) => {
     });
   }
   
+  // Validate aiProvider if provided
+  const validProviders = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
+  const provider = aiProvider || 'gemini';
+  if (!validProviders.includes(provider)) {
+    return res.status(400).json({
+      error: 'Invalid AI provider',
+      message: 'AI provider must be one of: ' + validProviders.join(', ')
+    });
+  }
+  
   try {
-    console.log(`📮 Manual prediction generation requested for ${symbol} ${interval}`);
+    console.log(`📮 Manual prediction generation requested for ${symbol} ${interval} using ${provider.toUpperCase()}`);
     
-    const result = await predictionService.generatePredictions(symbol, interval);
+    const result = await predictionService.generatePredictions(symbol, interval, provider);
     
     if (!result.success) {
       return res.status(500).json({
@@ -810,7 +820,7 @@ async function getLatestIndicatorsForPrediction(symbol, interval) {
 async function generateHourlyPredictions() {
   console.log('\n⏰ Running scheduled hourly prediction generation...');
   
-  const providers = ['gemini', 'gpt', 'claude'];
+  const providers = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
   
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {
@@ -840,7 +850,7 @@ async function generateHourlyPredictions() {
 async function generate4HourlyPredictions() {
   console.log('\n⏰ Running scheduled 4-hourly prediction generation...');
   
-  const providers = ['gemini', 'gpt', 'claude'];
+  const providers = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
   
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {
@@ -870,7 +880,7 @@ async function generate4HourlyPredictions() {
 async function generateDailyPredictions() {
   console.log('\n⏰ Running scheduled daily prediction generation...');
   
-  const providers = ['gemini', 'gpt', 'claude'];
+  const providers = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
   
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {

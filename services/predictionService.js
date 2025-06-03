@@ -5,31 +5,41 @@ const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs').promises;
 const path = require('path');
 const { formatPredictionPrompt, validatePredictionResponse } = require('../utils/predictionPrompt');
+const StatisticalModels = require('../utils/statisticalModels');
 
 class PredictionService {
   constructor() {
     this.db = new sqlite3.Database('./crypto_data.db');
     
-    // Initialize AI providers
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-pro-preview-05-06' });
+    // Initialize AI providers (with fallback for missing API keys)
+    if (process.env.GEMINI_API_KEY) {
+      this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+      this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-pro-preview-05-06' });
+    }
     
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    if (process.env.OPENAI_API_KEY) {
+      this.openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+    }
     
-    this.anthropic = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    if (process.env.ANTHROPIC_API_KEY) {
+      this.anthropic = new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY,
+      });
+    }
     
     this.sentimentDataFile = path.join(__dirname, '..', 'sentiment-data.json');
+    
+    // Initialize statistical models
+    this.statisticalModels = new StatisticalModels();
   }
 
   /**
    * Get predictions for a symbol/interval/provider
    * @param {string} symbol - Cryptocurrency symbol
    * @param {string} interval - Time interval
-   * @param {string} aiProvider - AI provider (gemini, gpt, claude)
+   * @param {string} aiProvider - AI provider (gemini, gpt, claude, arima, holt_winters)
    * @returns {Promise<Array>} Array of predictions
    */
   async getPredictions(symbol, interval, aiProvider = 'gemini') {
@@ -72,6 +82,495 @@ class PredictionService {
         } else {
           resolve(rows);
         }
+      });
+    });
+  }
+
+  /**
+   * Generate predictions using a specific AI provider or statistical model
+   * @param {string} provider - AI provider ('gemini', 'gpt', 'claude', 'arima', 'holt_winters')
+   * @param {string} prompt - The formatted prompt (not used for statistical models)
+   * @returns {Promise<string>} AI response text or statistical model identifier
+   */
+  async generateWithProvider(provider, prompt, retryCount = 0) {
+    const maxRetries = 3;
+    
+    try {
+      switch (provider) {
+        case 'arima':
+          // Statistical ARIMA model - no external API call needed
+          return 'statistical_model_arima';
+          
+        case 'holt_winters':
+          // Statistical Holt-Winters model - no external API call needed
+          return 'statistical_model_holt_winters';
+          
+        case 'gpt':
+          if (!this.openai) {
+            throw new Error('OpenAI API key not configured');
+          }
+          const openaiResponse = await this.openai.responses.create({
+            model: 'o4-mini',
+            reasoning: { effort: 'high' },
+            input: [
+              {
+                role: 'system',
+                content: 'You are an expert financial analyst, specializing in time series forecasting. Respond only with valid JSON containing exactly 24 predictions.'
+              },
+              {
+                role: 'user',
+                content: prompt
+              }
+            ]
+          });
+          return openaiResponse.output_text;
+
+        case 'claude':
+          if (!this.anthropic) {
+            throw new Error('Anthropic API key not configured');
+          }
+          const claudeResponse = await this.anthropic.messages.create({
+            model: 'claude-3-7-sonnet-latest',
+            temperature: 0.7,
+            max_tokens: 12000,
+            system: 'You are an expert financial analyst, specializing in time series forecasting. Respond only with valid JSON containing exactly 24 predictions.',
+            messages: [
+              {
+                role: 'user',
+                content: prompt
+              }
+            ]
+          });
+          return claudeResponse.content[0].text;
+
+        case 'gemini':
+        default:
+          if (!this.geminiModel) {
+            throw new Error('Gemini API key not configured');
+          }
+          // Configure Gemini with generation config for more consistent output
+          const generationConfig = {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 60000
+          };
+          
+          const result = await this.geminiModel.generateContent({
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            generationConfig,
+          });
+          const response = await result.response;
+          const text = response.text();
+          
+          // Validate that Gemini returned a response
+          if (!text || text.trim().length === 0) {
+            throw new Error('Gemini returned empty response');
+          }
+          
+          return text;
+      }
+    } catch (error) {
+      console.error(`Error with ${provider} (attempt ${retryCount + 1}/${maxRetries + 1}):`, error.message);
+      
+      // Retry logic for transient errors
+      if (retryCount < maxRetries) {
+        console.log(`Retrying ${provider} after ${(retryCount + 1) * 2} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 2000));
+        return this.generateWithProvider(provider, prompt, retryCount + 1);
+      }
+      
+      // If all retries failed, throw the error
+      throw error;
+    }
+  }
+
+  /**
+   * Generate predictions for a cryptocurrency
+   * @param {string} symbol - Cryptocurrency symbol (e.g., 'BTC', 'ETH')
+   * @param {string} interval - Time interval ('1h', '4h', '1d')
+   * @param {string} aiProvider - AI provider ('gemini', 'gpt', 'claude', 'arima', 'holt_winters')
+   * @param {number} maxRetries - Maximum number of retries (default: 3)
+   * @param {number} predictionsCount - Number of predictions to generate (default: 24)
+   * @returns {Promise<Object>} Prediction results
+   */
+  async generatePredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3, predictionsCount = 24) {
+    let lastError;
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`🔮 Generating ${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
+
+        // Fetch latest 500 kline data points
+        const klineData = await this.fetchKlineData(symbol, interval, 500);
+        if (!klineData || klineData.length === 0) {
+          throw new Error('No historical data available');
+        }
+
+        // Fetch existing future predictions for context
+        const existingPredictions = await this.getExistingFuturePredictions(symbol, interval, aiProvider);
+
+        // Fetch latest technical indicators
+        const indicators = await this.fetchTechnicalIndicators(symbol, interval);
+
+        // Read sentiment data from file
+        const sentimentData = await this.readSentimentData();
+
+        // Calculate the starting timestamp for new predictions
+        const nextTimestamp = this.calculateNextTimestamp(interval, existingPredictions, klineData);
+
+        let predictions;
+        
+        // Handle statistical models differently from AI providers
+        if (aiProvider === 'arima' || aiProvider === 'holt_winters') {
+          console.log(`📊 Generating predictions using ${aiProvider.toUpperCase()} statistical model...`);
+          
+          // Generate predictions using statistical models
+          if (aiProvider === 'arima') {
+            const arimaResults = this.statisticalModels.generateARIMAPredictions(klineData, interval, predictionsCount);
+            predictions = { predictions: arimaResults };
+          } else if (aiProvider === 'holt_winters') {
+            const hwResults = this.statisticalModels.generateHoltWintersPredictions(klineData, interval, predictionsCount);
+            predictions = { predictions: hwResults };
+          }
+          
+          // Validate statistical model predictions
+          if (!this.statisticalModels.validatePredictions(predictions.predictions)) {
+            throw new Error(`Invalid predictions generated by ${aiProvider} statistical model`);
+          }
+          
+          console.log(`✅ Generated ${predictions.predictions.length} predictions using ${aiProvider.toUpperCase()} model`);
+        } else {
+          // Handle AI providers
+          // Format prompt with existing predictions context
+          const prompt = formatPredictionPrompt(
+            symbol,
+            interval,
+            klineData,
+            indicators,
+            sentimentData,
+            existingPredictions,
+            predictionsCount,
+            nextTimestamp
+          );
+
+          const text = await this.generateWithProvider(aiProvider, prompt);
+          
+          // Parse and validate response
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) {
+            throw new Error(`No JSON structure found in ${aiProvider} response`);
+          }
+          
+          predictions = JSON.parse(jsonMatch[0]);
+        }
+
+        // Validate predictions format
+        if (!predictions || typeof predictions !== 'object' || !Array.isArray(predictions.predictions)) {
+          throw new Error(`Invalid prediction format from ${aiProvider}`);
+        }
+        
+        // Ensure each prediction has required fields
+        const validPredictions = predictions.predictions.every(pred =>
+          pred.hasOwnProperty('timestamp') &&
+          pred.hasOwnProperty('price') &&
+          typeof pred.timestamp === 'number' &&
+          typeof pred.price === 'number' &&
+          pred.price > 0
+        );
+        
+        if (!validPredictions) {
+          throw new Error(`Invalid prediction data from ${aiProvider}`);
+        }
+
+        // Store predictions in database with AI provider
+        const predictionTime = Date.now();
+        await this.storePredictions(symbol, interval, predictionTime, predictions.predictions, aiProvider);
+
+        const finalCount = predictions.predictions.length;
+        console.log(`✅ Generated ${finalCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`);
+        
+        return {
+          success: true,
+          symbol,
+          interval,
+          aiProvider,
+          predictionTime,
+          predictions: predictions.predictions,
+          isPartial: false,
+          requestedCount: predictionsCount,
+          actualCount: finalCount
+        };
+
+      } catch (error) {
+        lastError = error;
+        console.error(`Error generating predictions for ${symbol} with ${aiProvider} (attempt ${attempt + 1}/${maxRetries + 1}):`, error.message);
+        
+        // If this isn't the last attempt, wait with exponential backoff
+        if (attempt < maxRetries) {
+          const waitTime = Math.pow(2, attempt) * 2000; // 2s, 4s, 8s
+          console.log(`⏳ Waiting ${waitTime / 1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    }
+    
+    // All attempts failed
+    console.error(`❌ Failed to generate predictions for ${symbol} with ${aiProvider} after ${maxRetries + 1} attempts`);
+    return {
+      success: false,
+      error: lastError.message
+    };
+  }
+
+  /**
+   * Count existing future predictions for a symbol/interval/provider
+   */
+  async countFuturePredictions(symbol, interval, aiProvider) {
+    return new Promise((resolve, reject) => {
+      const currentTime = Date.now();
+      const query = `
+        SELECT COUNT(*) as count
+        FROM predictions
+        WHERE symbol = ?
+          AND interval = ?
+          AND ai_provider = ?
+          AND target_time > ?
+      `;
+
+      this.db.get(query, [symbol, interval, aiProvider, currentTime], (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row.count);
+        }
+      });
+    });
+  }
+
+  /**
+   * Get existing future predictions for context
+   */
+  async getExistingFuturePredictions(symbol, interval, aiProvider) {
+    return new Promise((resolve, reject) => {
+      const currentTime = Date.now();
+      
+      const query = `
+        SELECT
+          p1.target_time,
+          p1.predicted_price
+        FROM predictions p1
+        INNER JOIN (
+          SELECT
+            target_time,
+            MAX(prediction_time) as max_prediction_time
+          FROM predictions
+          WHERE symbol = ?
+            AND interval = ?
+            AND ai_provider = ?
+            AND target_time > ?
+          GROUP BY target_time
+        ) p2 ON p1.target_time = p2.target_time
+            AND p1.prediction_time = p2.max_prediction_time
+        WHERE p1.symbol = ?
+          AND p1.interval = ?
+          AND p1.ai_provider = ?
+        ORDER BY p1.target_time ASC
+      `;
+
+      this.db.all(query, [
+        symbol, interval, aiProvider, currentTime,
+        symbol, interval, aiProvider
+      ], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  /**
+   * Calculate the next timestamp for new predictions
+   */
+  calculateNextTimestamp(interval, existingPredictions, klineData) {
+    const intervalHours = interval === '1h' ? 1 : interval === '4h' ? 4 : 24;
+    const intervalMs = intervalHours * 3600 * 1000;
+
+    if (existingPredictions.length > 0) {
+      const lastTimestamp = Math.max(...existingPredictions.map(p => p.target_time));
+      return lastTimestamp + intervalMs;
+    } else {
+      const lastHistoricalTimestamp = klineData[klineData.length - 1].timestamp;
+      return lastHistoricalTimestamp + intervalMs;
+    }
+  }
+
+  /**
+   * Generate rolling predictions (only missing ones)
+   */
+  async generateRollingPredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
+    try {
+      console.log(`🔄 Checking rolling predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...`);
+
+      const existingCount = await this.countFuturePredictions(symbol, interval, aiProvider);
+      const predictionsNeeded = Math.max(0, 24 - existingCount);
+
+      console.log(`📊 Found ${existingCount} existing future predictions, need ${predictionsNeeded} more`);
+
+      if (predictionsNeeded === 0) {
+        console.log(`✅ Already have 24 future predictions for ${symbol} (${interval}), no rolling needed`);
+        return {
+          success: true,
+          symbol,
+          interval,
+          aiProvider,
+          predictionsNeeded: 0,
+          generated: 0,
+          message: 'No new predictions needed'
+        };
+      }
+
+      const result = await this.generatePredictions(symbol, interval, aiProvider, maxRetries, predictionsNeeded);
+      
+      if (result.success) {
+        console.log(`✅ Rolling predictions completed for ${symbol} (${interval}): generated ${predictionsNeeded} new predictions`);
+      }
+
+      return {
+        ...result,
+        predictionsNeeded,
+        generated: result.success ? predictionsNeeded : 0
+      };
+
+    } catch (error) {
+      console.error(`❌ Error in rolling predictions for ${symbol} (${interval}):`, error.message);
+      return {
+        success: false,
+        error: error.message,
+        symbol,
+        interval,
+        aiProvider
+      };
+    }
+  }
+
+  /**
+   * Fetch historical kline data from database
+   */
+  fetchKlineData(symbol, interval, limit) {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT open_time as timestamp, open, high, low, close, volume
+        FROM kline_data
+        WHERE symbol = ? AND interval = ?
+        ORDER BY open_time DESC
+        LIMIT ?
+      `;
+
+      this.db.all(query, [symbol, interval, limit], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows.reverse());
+        }
+      });
+    });
+  }
+
+  /**
+   * Fetch technical indicators from database
+   */
+  fetchTechnicalIndicators(symbol, interval) {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT timestamp, sma_20, sma_50, rsi_14, macd, macd_signal, macd_histogram
+        FROM technical_indicators
+        WHERE symbol = ? AND interval = ?
+        ORDER BY timestamp DESC
+        LIMIT 10
+      `;
+
+      this.db.all(query, [symbol, interval], (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
+
+  /**
+   * Read sentiment data from file
+   */
+  async readSentimentData() {
+    try {
+      const data = await fs.readFile(this.sentimentDataFile, 'utf8');
+      return JSON.parse(data);
+    } catch (error) {
+      console.error('Error reading sentiment data:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Store predictions in database
+   */
+  storePredictions(symbol, interval, predictionTime, predictions, aiProvider = 'gemini') {
+    return new Promise((resolve, reject) => {
+      const stmt = this.db.prepare(`
+        INSERT OR IGNORE INTO predictions
+        (symbol, interval, prediction_time, target_time, predicted_price, model_version, ai_provider)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      let completed = 0;
+      let hasError = false;
+      let skipped = 0;
+
+      // Map provider to model version
+      const modelVersions = {
+        'gemini': 'gemini-2.5-pro-preview-05-06',
+        'gpt': 'o4-mini',
+        'claude': 'claude-3-7-sonnet-latest',
+        'arima': 'arima-statistical-model',
+        'holt_winters': 'holt-winters-statistical-model'
+      };
+
+      predictions.forEach(pred => {
+        stmt.run(
+          symbol,
+          interval,
+          predictionTime,
+          pred.timestamp,
+          pred.price,
+          modelVersions[aiProvider] || modelVersions['gemini'],
+          aiProvider,
+          function(err) {
+            if (err && !hasError) {
+              hasError = true;
+              stmt.finalize();
+              reject(err);
+              return;
+            }
+            
+            if (this.changes === 0) {
+              skipped++;
+              console.warn(`⚠️ Duplicate prediction skipped: ${symbol} ${interval} at ${new Date(pred.timestamp).toISOString()}`);
+            }
+            
+            completed++;
+            if (completed === predictions.length && !hasError) {
+              stmt.finalize();
+              if (skipped > 0) {
+                console.log(`✅ Stored ${predictions.length - skipped} new predictions, skipped ${skipped} duplicates for ${symbol} (${interval})`);
+              }
+              resolve();
+            }
+          }
+        );
       });
     });
   }
@@ -137,674 +636,10 @@ class PredictionService {
   }
 
   /**
-   * Generate predictions using a specific AI provider
-   * @param {string} provider - AI provider ('gemini', 'gpt', 'claude')
-   * @param {string} prompt - The formatted prompt
-   * @returns {Promise<string>} AI response text
-   */
-  async generateWithProvider(provider, prompt, retryCount = 0) {
-    const maxRetries = 3;
-    
-    try {
-      switch (provider) {
-        case 'gpt':
-          const openaiResponse = await this.openai.responses.create({
-            model: 'o4-mini',
-            reasoning: { effort: 'medium' },
-            input: [
-              {
-                role: 'system',
-                content: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.'
-              },
-              {
-                role: 'user',
-                content: prompt
-              }
-            ]
-          });
-          return openaiResponse.output_text;
-
-        case 'claude':
-          const claudeResponse = await this.anthropic.messages.create({
-            model: 'claude-3-7-sonnet-latest',
-            temperature: 0.7,
-            max_tokens: 12000,
-            system: 'You are a cryptocurrency price prediction expert. Respond only with valid JSON containing exactly 24 predictions.',
-            messages: [
-              {
-                role: 'user',
-                content: prompt
-              }
-            ]
-          });
-          return claudeResponse.content[0].text;
-
-        case 'gemini':
-        default:
-          // Configure Gemini with generation config for more consistent output
-          const generationConfig = {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 60000
-          };
-          
-          const result = await this.geminiModel.generateContent({
-            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-            generationConfig,
-          });
-          const response = await result.response;
-          const text = response.text();
-          
-          // Diagnostic logging for response analysis
-          console.log(`📊 Gemini response length: ${text ? text.length : 0} characters`);
-          if (text && text.length > 0) {
-            const lastChars = text.slice(-50);
-            console.log(`📊 Response ending: "${lastChars}"`);
-          }
-          
-          // Validate that Gemini returned a response
-          if (!text || text.trim().length === 0) {
-            throw new Error('Gemini returned empty response');
-          }
-          
-          // Enhanced response validation for truncation detection
-          const trimmedText = text.trim();
-          
-          // Check for signs of truncation
-          const isTruncated = this.detectResponseTruncation(trimmedText);
-          if (isTruncated) {
-            console.warn(`⚠️ Detected truncated Gemini response (length: ${text.length})`);
-            console.warn(`⚠️ Response ending: "${trimmedText.slice(-100)}"`);
-            console.log('🔧 Attempting to extract partial predictions from truncated response...');
-            
-            // Try to extract partial predictions instead of failing
-            const partialPredictions = this.extractPartialPredictions(trimmedText);
-            if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
-              console.log(`✅ Successfully extracted ${partialPredictions.predictions.length} predictions from truncated response`);
-              // Continue with the extracted predictions - don't throw an error
-              return trimmedText; // Return the original text so the normal parsing flow can handle the extracted data
-            } else {
-              console.error(`❌ Could not extract any valid predictions from truncated response`);
-              throw new Error(`Gemini response is truncated and no valid predictions could be extracted. Response length: ${text.length} characters.`);
-            }
-          }
-          
-          // Check if response contains JSON structure
-          const jsonMatch = trimmedText.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) {
-            console.error(`Gemini response without JSON (attempt ${retryCount + 1}/${maxRetries + 1}):`, text);
-            throw new Error('Gemini response does not contain valid JSON structure');
-          }
-          
-          // Validate JSON completeness
-          const jsonText = jsonMatch[0];
-          if (!this.validateJsonCompleteness(jsonText)) {
-            console.error(`🚨 Incomplete JSON structure detected in Gemini response`);
-            console.error(`🚨 JSON ending: "${jsonText.slice(-100)}"`);
-            throw new Error('Gemini response contains incomplete JSON structure. Response may be truncated.');
-          }
-          
-          console.log(`✅ Gemini response validation passed (${text.length} chars, JSON complete)`);
-          return text;
-      }
-    } catch (error) {
-      console.error(`Error with ${provider} (attempt ${retryCount + 1}/${maxRetries + 1}):`, error.message);
-      
-      // Retry logic for transient errors
-      if (retryCount < maxRetries) {
-        console.log(`Retrying ${provider} after ${(retryCount + 1) * 2} seconds...`);
-        await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 2000));
-        return this.generateWithProvider(provider, prompt, retryCount + 1);
-      }
-      
-      // If all retries failed, throw the error
-      throw error;
-    }
-  }
-
-  /**
-   * Generate predictions for a cryptocurrency with exponential backoff retry
-   * @param {string} symbol - Cryptocurrency symbol (e.g., 'BTC', 'ETH')
-   * @param {string} interval - Time interval ('1h', '4h', '1d')
-   * @param {string} aiProvider - AI provider ('gemini', 'gpt', 'claude')
-   * @param {number} maxRetries - Maximum number of retries (default: 3)
-   * @returns {Promise<Object>} Prediction results
-   */
-  async generatePredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3, predictionsCount = 24) {
-    let lastError;
-    
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`🔮 Generating ${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...${attempt > 0 ? ` (attempt ${attempt + 1}/${maxRetries + 1})` : ''}`);
-
-        // Fetch latest 100 kline data points
-        const klineData = await this.fetchKlineData(symbol, interval, 500);
-        if (!klineData || klineData.length === 0) {
-          throw new Error('No historical data available');
-        }
-
-        // Fetch existing future predictions for context
-        const existingPredictions = await this.getExistingFuturePredictions(symbol, interval, aiProvider);
-
-        // Fetch latest technical indicators
-        const indicators = await this.fetchTechnicalIndicators(symbol, interval);
-
-        // Read sentiment data from file
-        const sentimentData = await this.readSentimentData();
-
-        // Calculate the starting timestamp for new predictions
-        const nextTimestamp = this.calculateNextTimestamp(interval, existingPredictions, klineData);
-
-        // Format prompt with existing predictions context
-        const prompt = formatPredictionPrompt(
-          symbol,
-          interval,
-          klineData,
-          indicators,
-          sentimentData,
-          existingPredictions,
-          predictionsCount,
-          nextTimestamp
-        );
-
-        // Generate predictions using selected AI provider with retry logic
-        let text;
-        let predictions;
-        
-        try {
-          text = await this.generateWithProvider(aiProvider, prompt);
-          
-          // Parse and validate response with enhanced error handling
-          try {
-            // Extract JSON from response (in case there's extra text)
-            const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (!jsonMatch) {
-              console.error(`🚨 No JSON structure found in ${aiProvider} response`);
-              console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
-              console.error(`🚨 Response preview: "${text ? text.slice(0, 200) : 'null'}..."`);
-              
-              // For Gemini, try to extract partial predictions as last resort
-              if (aiProvider === 'gemini') {
-                console.log('🔧 Attempting to extract partial predictions from malformed response...');
-                const partialPredictions = this.extractPartialPredictions(text);
-                if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
-                  console.log(`✅ Extracted ${partialPredictions.predictions.length} predictions from malformed response`);
-                  predictions = partialPredictions;
-                } else {
-                  throw new Error('No JSON found in response and no partial predictions could be extracted');
-                }
-              } else {
-                throw new Error('No JSON found in response - response may be truncated or malformed');
-              }
-            } else {
-              const jsonText = jsonMatch[0];
-              
-              // Additional validation for Gemini responses
-              if (aiProvider === 'gemini') {
-                // Log JSON extraction details
-                console.log(`📊 Extracted JSON length: ${jsonText.length} characters`);
-                
-                // Check for truncation signs in the extracted JSON
-                if (!this.validateJsonCompleteness(jsonText)) {
-                  console.warn(`⚠️ Incomplete JSON structure in ${aiProvider} response`);
-                  console.warn(`⚠️ JSON ending: "${jsonText.slice(-100)}"`);
-                  console.log('🔧 Attempting to extract partial predictions from incomplete JSON...');
-                  
-                  // Try to extract partial predictions instead of failing
-                  const partialPredictions = this.extractPartialPredictions(text);
-                  if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
-                    console.log(`✅ Extracted ${partialPredictions.predictions.length} predictions from incomplete JSON`);
-                    predictions = partialPredictions;
-                  } else {
-                    throw new Error('Extracted JSON appears incomplete and no partial predictions could be extracted');
-                  }
-                } else {
-                  predictions = JSON.parse(jsonText);
-                }
-              } else {
-                predictions = JSON.parse(jsonText);
-              }
-            }
-          } catch (parseError) {
-            // If we haven't already tried partial extraction for Gemini, try it now
-            if (aiProvider === 'gemini' && !predictions) {
-              console.warn(`⚠️ JSON parsing failed for ${aiProvider}:`, parseError.message);
-              console.log('🔧 Final attempt: extracting partial predictions...');
-              
-              const partialPredictions = this.extractPartialPredictions(text);
-              if (partialPredictions && partialPredictions.predictions && partialPredictions.predictions.length > 0) {
-                console.log(`✅ Final extraction successful: ${partialPredictions.predictions.length} predictions`);
-                predictions = partialPredictions;
-              } else {
-                console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
-                console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
-                console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
-                
-                // Provide specific guidance for truncation issues
-                if (parseError.message.includes('Unexpected end of JSON input') ||
-                    parseError.message.includes('position')) {
-                  throw new Error(`JSON parsing failed and no partial predictions could be extracted. Original error: ${parseError.message}`);
-                }
-                
-                throw new Error(`Invalid response format and no partial predictions could be extracted: ${parseError.message}`);
-              }
-            } else {
-              console.error(`🚨 Failed to parse ${aiProvider} response:`, parseError.message);
-              console.error(`🚨 Response length: ${text ? text.length : 0} characters`);
-              console.error(`🚨 Response ending: "${text ? text.slice(-100) : 'null'}"`);
-              
-              // Provide specific guidance for truncation issues
-              if (parseError.message.includes('Unexpected end of JSON input') ||
-                  parseError.message.includes('position')) {
-                throw new Error(`JSON parsing failed at position ${parseError.message.match(/position (\d+)/)?.[1] || 'unknown'} - likely due to response truncation. Try reducing prediction count or increasing token limit.`);
-              }
-              
-              throw new Error(`Invalid response format: ${parseError.message}`);
-            }
-          }
-        } catch (error) {
-          // Log the error with more context
-          console.error(`🚨 Failed to generate predictions with ${aiProvider}:`, error.message);
-          
-          // For Gemini specifically, provide more detailed error info and guidance
-          if (aiProvider === 'gemini') {
-            console.error('🚨 Gemini API Error Details:');
-            console.error(`   - Error: ${error.message}`);
-            
-            // Provide specific guidance based on error type
-            if (error.message.includes('truncated') || error.message.includes('incomplete')) {
-              console.error('🔧 Suggested fixes for truncation:');
-              console.error('   1. Token limit increased to 32768 (already applied)');
-              console.error('   2. Consider reducing prediction count if issue persists');
-              console.error('   3. Try again as this may be a temporary API issue');
-            } else if (error.message.includes('JSON') || error.message.includes('parse')) {
-              console.error('🔧 Suggested fixes for JSON parsing:');
-              console.error('   1. Response validation enhanced (already applied)');
-              console.error('   2. Check if Gemini API is experiencing issues');
-              console.error('   3. Consider using a different AI provider temporarily');
-            } else {
-              console.error('🔧 General troubleshooting:');
-              console.error('   1. Check API key and quota limits');
-              console.error('   2. Verify network connectivity');
-              console.error('   3. Try using a different AI provider');
-            }
-          }
-          
-          throw error;
-        }
-
-        // Validate predictions format
-        if (!predictions || typeof predictions !== 'object' || !Array.isArray(predictions.predictions)) {
-          throw new Error(`Invalid prediction format from ${aiProvider}`);
-        }
-        
-        // Ensure each prediction has required fields
-        const validPredictions = predictions.predictions.every(pred =>
-          pred.hasOwnProperty('timestamp') &&
-          pred.hasOwnProperty('price') &&
-          typeof pred.timestamp === 'number' &&
-          typeof pred.price === 'number' &&
-          pred.price > 0
-        );
-        
-        if (!validPredictions) {
-          throw new Error(`Invalid prediction data from ${aiProvider}`);
-        }
-        
-        // Check if we got the expected number of predictions
-        const actualCount = predictions.predictions.length;
-        if (actualCount < predictionsCount) {
-          const percentage = Math.round((actualCount / predictionsCount) * 100);
-          console.warn(`⚠️ ${aiProvider} returned ${actualCount}/${predictionsCount} predictions (${percentage}%) for ${symbol} (${interval})`);
-          
-          // For partial extractions, be more lenient with the minimum threshold
-          const minAcceptable = Math.ceil(predictionsCount * 0.5); // Reduced from 80% to 50%
-          if (actualCount < minAcceptable) {
-            throw new Error(`Insufficient predictions returned: ${actualCount}/${predictionsCount} (minimum ${minAcceptable} required)`);
-          } else {
-            console.log(`✅ Accepting ${actualCount} predictions (above minimum threshold of ${minAcceptable})`);
-          }
-        }
-
-        // Store predictions in database with AI provider
-        const predictionTime = Date.now();
-        await this.storePredictions(symbol, interval, predictionTime, predictions.predictions, aiProvider);
-
-        const finalCount = predictions.predictions.length;
-        const isPartial = finalCount < predictionsCount;
-        const statusMessage = isPartial
-          ? `✅ Extracted ${finalCount}/${predictionsCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()} (partial due to truncation)`
-          : `✅ Generated ${finalCount} predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}`;
-        
-        console.log(statusMessage);
-        
-        return {
-          success: true,
-          symbol,
-          interval,
-          aiProvider,
-          predictionTime,
-          predictions: predictions.predictions,
-          isPartial: isPartial,
-          requestedCount: predictionsCount,
-          actualCount: finalCount
-        };
-
-      } catch (error) {
-        lastError = error;
-        console.error(`Error generating predictions for ${symbol} with ${aiProvider} (attempt ${attempt + 1}/${maxRetries + 1}):`, error.message);
-        
-        // If this isn't the last attempt, wait with exponential backoff
-        if (attempt < maxRetries) {
-          const waitTime = Math.pow(2, attempt) * 2000; // 2s, 4s, 8s
-          console.log(`⏳ Waiting ${waitTime / 1000}s before retry...`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-        }
-      }
-    }
-    
-    // All attempts failed
-    console.error(`❌ Failed to generate predictions for ${symbol} with ${aiProvider} after ${maxRetries + 1} attempts`);
-    return {
-      success: false,
-      error: lastError.message
-    };
-  }
-
-  /**
-   * Count existing future predictions for a symbol/interval/provider
+   * Update actual prices for predictions
    * @param {string} symbol - Cryptocurrency symbol
    * @param {string} interval - Time interval
-   * @param {string} aiProvider - AI provider
-   * @returns {Promise<number>} Number of existing future predictions
-   */
-  async countFuturePredictions(symbol, interval, aiProvider) {
-    return new Promise((resolve, reject) => {
-      const currentTime = Date.now();
-      const query = `
-        SELECT COUNT(*) as count
-        FROM predictions
-        WHERE symbol = ?
-          AND interval = ?
-          AND ai_provider = ?
-          AND target_time > ?
-      `;
-
-      this.db.get(query, [symbol, interval, aiProvider, currentTime], (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row.count);
-        }
-      });
-    });
-  }
-
-  /**
-   * Get existing future predictions for context
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {string} aiProvider - AI provider
-   * @returns {Promise<Array>} Array of existing future predictions
-   */
-  async getExistingFuturePredictions(symbol, interval, aiProvider) {
-    return new Promise((resolve, reject) => {
-      const currentTime = Date.now();
-      
-      // Get the most recent prediction for each future target_time
-      const query = `
-        SELECT
-          p1.target_time,
-          p1.predicted_price
-        FROM predictions p1
-        INNER JOIN (
-          SELECT
-            target_time,
-            MAX(prediction_time) as max_prediction_time
-          FROM predictions
-          WHERE symbol = ?
-            AND interval = ?
-            AND ai_provider = ?
-            AND target_time > ?
-          GROUP BY target_time
-        ) p2 ON p1.target_time = p2.target_time
-            AND p1.prediction_time = p2.max_prediction_time
-        WHERE p1.symbol = ?
-          AND p1.interval = ?
-          AND p1.ai_provider = ?
-        ORDER BY p1.target_time ASC
-      `;
-
-      this.db.all(query, [
-        symbol, interval, aiProvider, currentTime,
-        symbol, interval, aiProvider
-      ], (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows);
-        }
-      });
-    });
-  }
-
-  /**
-   * Calculate the next timestamp for new predictions
-   * @param {string} interval - Time interval
-   * @param {Array} existingPredictions - Existing future predictions
-   * @param {Array} klineData - Historical kline data
-   * @returns {number} Next timestamp for predictions
-   */
-  calculateNextTimestamp(interval, existingPredictions, klineData) {
-    const intervalHours = interval === '1h' ? 1 : interval === '4h' ? 4 : 24;
-    const intervalMs = intervalHours * 3600 * 1000;
-
-    if (existingPredictions.length > 0) {
-      // Start from the last existing prediction timestamp
-      const lastTimestamp = Math.max(...existingPredictions.map(p => p.target_time));
-      return lastTimestamp + intervalMs;
-    } else {
-      // Start from the last historical data point
-      const lastHistoricalTimestamp = klineData[klineData.length - 1].timestamp;
-      return lastHistoricalTimestamp + intervalMs;
-    }
-  }
-
-  /**
-   * Generate rolling predictions (only missing ones)
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {string} aiProvider - AI provider
-   * @param {number} maxRetries - Maximum number of retries
-   * @returns {Promise<Object>} Rolling prediction results
-   */
-  async generateRollingPredictions(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
-    try {
-      console.log(`🔄 Checking rolling predictions for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...`);
-
-      // Count existing future predictions
-      const existingCount = await this.countFuturePredictions(symbol, interval, aiProvider);
-      const predictionsNeeded = Math.max(0, 24 - existingCount);
-
-      console.log(`📊 Found ${existingCount} existing future predictions, need ${predictionsNeeded} more`);
-
-      if (predictionsNeeded === 0) {
-        console.log(`✅ Already have 24 future predictions for ${symbol} (${interval}), no rolling needed`);
-        return {
-          success: true,
-          symbol,
-          interval,
-          aiProvider,
-          predictionsNeeded: 0,
-          generated: 0,
-          message: 'No new predictions needed'
-        };
-      }
-
-      // Generate the missing predictions
-      const result = await this.generatePredictions(symbol, interval, aiProvider, maxRetries, predictionsNeeded);
-      
-      if (result.success) {
-        console.log(`✅ Rolling predictions completed for ${symbol} (${interval}): generated ${predictionsNeeded} new predictions`);
-      }
-
-      return {
-        ...result,
-        predictionsNeeded,
-        generated: result.success ? predictionsNeeded : 0
-      };
-
-    } catch (error) {
-      console.error(`❌ Error in rolling predictions for ${symbol} (${interval}):`, error.message);
-      return {
-        success: false,
-        error: error.message,
-        symbol,
-        interval,
-        aiProvider
-      };
-    }
-  }
-
-  /**
-   * Fetch historical kline data from database
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {number} limit - Number of data points to fetch
-   * @returns {Promise<Array>} Kline data
-   */
-  fetchKlineData(symbol, interval, limit) {
-    return new Promise((resolve, reject) => {
-      const query = `
-        SELECT open_time as timestamp, open, high, low, close, volume
-        FROM kline_data
-        WHERE symbol = ? AND interval = ?
-        ORDER BY open_time DESC
-        LIMIT ?
-      `;
-
-      this.db.all(query, [symbol, interval, limit], (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          // Reverse to get chronological order
-          resolve(rows.reverse());
-        }
-      });
-    });
-  }
-
-  /**
-   * Fetch technical indicators from database
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @returns {Promise<Array>} Technical indicators
-   */
-  fetchTechnicalIndicators(symbol, interval) {
-    return new Promise((resolve, reject) => {
-      const query = `
-        SELECT timestamp, sma_20, sma_50, rsi_14, macd, macd_signal, macd_histogram
-        FROM technical_indicators
-        WHERE symbol = ? AND interval = ?
-        ORDER BY timestamp DESC
-        LIMIT 10
-      `;
-
-      this.db.all(query, [symbol, interval], (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows);
-        }
-      });
-    });
-  }
-
-  /**
-   * Read sentiment data from file
-   * @returns {Promise<Object>} Sentiment data
-   */
-  async readSentimentData() {
-    try {
-      const data = await fs.readFile(this.sentimentDataFile, 'utf8');
-      return JSON.parse(data);
-    } catch (error) {
-      console.error('Error reading sentiment data:', error.message);
-      return null;
-    }
-  }
-
-  /**
-   * Store predictions in database
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {number} predictionTime - Timestamp when prediction was made
-   * @param {Array} predictions - Array of predictions
-   * @param {string} aiProvider - AI provider ('gemini', 'gpt', 'claude')
-   * @returns {Promise<void>}
-   */
-  storePredictions(symbol, interval, predictionTime, predictions, aiProvider = 'gemini') {
-    return new Promise((resolve, reject) => {
-      const stmt = this.db.prepare(`
-        INSERT OR IGNORE INTO predictions
-        (symbol, interval, prediction_time, target_time, predicted_price, model_version, ai_provider)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-
-      let completed = 0;
-      let hasError = false;
-      let skipped = 0;
-
-      // Map provider to model version
-      const modelVersions = {
-        'gemini': 'gemini-2.5-pro-preview-05-06',
-        'gpt': 'o4-mini',
-        'claude': 'claude-3-7-sonnet-latest'
-      };
-
-      predictions.forEach(pred => {
-        stmt.run(
-          symbol,
-          interval,
-          predictionTime,
-          pred.timestamp,
-          pred.price,
-          modelVersions[aiProvider] || modelVersions['gemini'],
-          aiProvider,
-          function(err) {
-            if (err && !hasError) {
-              hasError = true;
-              stmt.finalize();
-              reject(err);
-              return;
-            }
-            
-            // Check if row was actually inserted (changes will be 0 if ignored)
-            if (this.changes === 0) {
-              skipped++;
-              console.warn(`⚠️ Duplicate prediction skipped: ${symbol} ${interval} at ${new Date(pred.timestamp).toISOString()} - preserving historical data`);
-            }
-            
-            completed++;
-            if (completed === predictions.length && !hasError) {
-              stmt.finalize();
-              if (skipped > 0) {
-                console.log(`✅ Stored ${predictions.length - skipped} new predictions, skipped ${skipped} duplicates for ${symbol} (${interval})`);
-              }
-              resolve();
-            }
-          }
-        );
-      });
-    });
-  }
-
-  /**
-   * Update predictions with actual prices when available
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @returns {Promise<Object>} Update results
+   * @returns {Promise<Object>} Update result
    */
   async updateActualPrices(symbol, interval) {
     try {
@@ -842,9 +677,6 @@ class PredictionService {
 
       console.log(`✅ Updated ${updated} predictions with actual prices for ${symbol} (${interval})`);
       
-      // Calculate and store daily metrics
-      await this.calculateDailyMetrics(symbol, interval);
-      
       return { updated };
 
     } catch (error) {
@@ -863,21 +695,21 @@ class PredictionService {
     return new Promise((resolve, reject) => {
       const currentTime = Date.now();
       const query = `
-        SELECT id, target_time, predicted_price, ai_provider
+        SELECT id, target_time, predicted_price
         FROM predictions
         WHERE symbol = ?
           AND interval = ?
-          AND actual_price IS NULL
           AND target_time <= ?
-        ORDER BY target_time
-        LIMIT 300
+          AND actual_price IS NULL
+        ORDER BY target_time ASC
+        LIMIT 100
       `;
 
       this.db.all(query, [symbol, interval, currentTime], (err, rows) => {
         if (err) {
           reject(err);
         } else {
-          resolve(rows);
+          resolve(rows || []);
         }
       });
     });
@@ -887,44 +719,29 @@ class PredictionService {
    * Get actual price for a specific timestamp
    * @param {string} symbol - Cryptocurrency symbol
    * @param {string} interval - Time interval
-   * @param {number} timestamp - Target timestamp
+   * @param {number} targetTime - Target timestamp
    * @returns {Promise<number|null>} Actual price or null
    */
-  getActualPrice(symbol, interval, timestamp) {
-    return new Promise((resolve, reject) => {
-      // Allow for some time tolerance (within the interval period)
-      const tolerance = interval === '1h' ? 3600000 : interval === '4h' ? 14400000 : 86400000;
-      
-      const query = `
-        SELECT close
-        FROM kline_data
-        WHERE symbol = ?
-          AND interval = ?
-          AND open_time >= ?
-          AND open_time <= ?
-        ORDER BY ABS(open_time - ?)
-        LIMIT 1
-      `;
-
-      this.db.get(
-        query, 
-        [symbol, interval, timestamp - tolerance, timestamp + tolerance, timestamp],
-        (err, row) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(row ? row.close : null);
-          }
+  async getActualPrice(symbol, interval, targetTime) {
+    try {
+      const response = await fetch(`http://localhost:3000/api/klines/${symbol}/${interval}?limit=1&startTime=${targetTime}&endTime=${targetTime + 60000}`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data && data.length > 0) {
+          return data[0].close;
         }
-      );
-    });
+      }
+    } catch (error) {
+      console.error(`Error fetching actual price for ${symbol} at ${targetTime}:`, error);
+    }
+    return null;
   }
 
   /**
    * Update prediction with actual price and accuracy
    * @param {number} predictionId - Prediction ID
    * @param {number} actualPrice - Actual price
-   * @param {number} accuracyScore - Accuracy score (0-100)
+   * @param {number} accuracyScore - Accuracy score
    * @returns {Promise<void>}
    */
   updatePrediction(predictionId, actualPrice, accuracyScore) {
@@ -943,460 +760,6 @@ class PredictionService {
         }
       });
     });
-  }
-
-  /**
-   * Calculate accuracy metrics for predictions
-   * @param {string} symbol - Cryptocurrency symbol (optional)
-   * @param {string} interval - Time interval (optional)
-   * @returns {Promise<Object>} Accuracy metrics
-   */
-  async calculateAccuracy(symbol = null, interval = null) {
-    try {
-      console.log(`📈 Calculating accuracy metrics...`);
-
-      const metrics = await this.getAccuracyMetrics(symbol, interval);
-      
-      if (!metrics || metrics.count === 0) {
-        return {
-          message: 'No completed predictions available for accuracy calculation',
-          metrics: null
-        };
-      }
-
-      const result = {
-        totalPredictions: metrics.count,
-        averageAccuracy: parseFloat(metrics.avg_accuracy).toFixed(2),
-        mae: parseFloat(metrics.mae).toFixed(2),
-        rmse: parseFloat(metrics.rmse).toFixed(2),
-        mape: parseFloat(metrics.mape).toFixed(2)
-      };
-
-      if (symbol) result.symbol = symbol;
-      if (interval) result.interval = interval;
-
-      console.log(`✅ Accuracy metrics calculated:`, result);
-      
-      return result;
-
-    } catch (error) {
-      console.error('Error calculating accuracy:', error);
-      return { error: error.message };
-    }
-  }
-
-  /**
-   * Get accuracy metrics from database
-   * @param {string} symbol - Cryptocurrency symbol (optional)
-   * @param {string} interval - Time interval (optional)
-   * @returns {Promise<Object>} Metrics data
-   */
-  getAccuracyMetrics(symbol, interval) {
-    return new Promise((resolve, reject) => {
-      let query = `
-        SELECT 
-          COUNT(*) as count,
-          AVG(accuracy_score) as avg_accuracy,
-          AVG(ABS(predicted_price - actual_price)) as mae,
-          SQRT(AVG((predicted_price - actual_price) * (predicted_price - actual_price))) as rmse,
-          AVG(ABS(predicted_price - actual_price) / actual_price * 100) as mape
-        FROM predictions
-        WHERE actual_price IS NOT NULL
-      `;
-
-      const params = [];
-      
-      if (symbol) {
-        query += ' AND symbol = ?';
-        params.push(symbol);
-      }
-      
-      if (interval) {
-        query += ' AND interval = ?';
-        params.push(interval);
-      }
-
-      this.db.get(query, params, (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
-  }
-
-  /**
-   * Calculate and store daily metrics
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @returns {Promise<void>}
-   */
-  async calculateDailyMetrics(symbol, interval) {
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      
-      const metrics = await this.getDailyMetrics(symbol, interval, today);
-      
-      if (metrics && metrics.count > 0) {
-        await this.storeDailyMetrics(
-          symbol,
-          interval,
-          today,
-          metrics.mae,
-          metrics.rmse,
-          metrics.avg_accuracy,
-          metrics.count
-        );
-      }
-    } catch (error) {
-      console.error('Error calculating daily metrics:', error);
-    }
-  }
-
-  /**
-   * Get daily metrics from predictions
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {string} date - Date in YYYY-MM-DD format
-   * @returns {Promise<Object>} Daily metrics
-   */
-  getDailyMetrics(symbol, interval, date) {
-    return new Promise((resolve, reject) => {
-      const startTime = new Date(date).getTime();
-      const endTime = startTime + 86400000; // +24 hours
-
-      const query = `
-        SELECT 
-          COUNT(*) as count,
-          AVG(accuracy_score) as avg_accuracy,
-          AVG(ABS(predicted_price - actual_price)) as mae,
-          SQRT(AVG((predicted_price - actual_price) * (predicted_price - actual_price))) as rmse
-        FROM predictions
-        WHERE symbol = ?
-          AND interval = ?
-          AND actual_price IS NOT NULL
-          AND target_time >= ?
-          AND target_time < ?
-      `;
-
-      this.db.get(query, [symbol, interval, startTime, endTime], (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
-  }
-
-  /**
-   * Store daily metrics in database
-   * @param {string} symbol - Cryptocurrency symbol
-   * @param {string} interval - Time interval
-   * @param {string} date - Date in YYYY-MM-DD format
-   * @param {number} mae - Mean Absolute Error
-   * @param {number} rmse - Root Mean Square Error
-   * @param {number} accuracy - Average accuracy percentage
-   * @param {number} count - Number of predictions
-   * @returns {Promise<void>}
-   */
-  storeDailyMetrics(symbol, interval, date, mae, rmse, accuracy, count) {
-    return new Promise((resolve, reject) => {
-      const query = `
-        INSERT OR REPLACE INTO prediction_metrics
-        (symbol, interval, date, mae, rmse, accuracy_percentage, predictions_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `;
-
-      this.db.run(
-        query,
-        [symbol, interval, date, mae, rmse, accuracy, count],
-        (err) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve();
-          }
-        }
-      );
-    });
-  }
-
-  /**
-   * Detect if a response appears to be truncated
-   * @param {string} text - Response text to check
-   * @returns {boolean} True if response appears truncated
-   */
-  detectResponseTruncation(text) {
-    if (!text || text.length === 0) {
-      return true;
-    }
-    
-    const trimmed = text.trim();
-    
-    // Check for common truncation indicators
-    const truncationIndicators = [
-      // Ends abruptly without proper JSON closure
-      /[^}\]]\s*$/,
-      // Ends with incomplete JSON structure
-      /[,{[][\s]*$/,
-      // Ends with incomplete string
-      /"[^"]*$/,
-      // Ends with incomplete number
-      /\d+\.?\d*$/,
-      // Very short response (likely truncated)
-      trimmed.length < 100
-    ];
-    
-    // Check if response is suspiciously short for 24 predictions
-    if (trimmed.length < 500) {
-      console.warn(`⚠️ Response suspiciously short: ${trimmed.length} characters`);
-      return true;
-    }
-    
-    // Check for truncation patterns
-    for (const indicator of truncationIndicators.slice(0, -1)) { // Exclude length check
-      if (indicator.test && indicator.test(trimmed)) {
-        console.warn(`⚠️ Truncation pattern detected: ${indicator}`);
-        return true;
-      }
-    }
-    
-    return false;
-  }
-  
-  /**
-   * Validate that JSON structure is complete
-   * @param {string} jsonText - JSON text to validate
-   * @returns {boolean} True if JSON appears complete
-   */
-  validateJsonCompleteness(jsonText) {
-    if (!jsonText || jsonText.trim().length === 0) {
-      return false;
-    }
-    
-    const trimmed = jsonText.trim();
-    
-    // Basic structure checks
-    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
-      console.warn(`⚠️ JSON doesn't start with { or end with }`);
-      return false;
-    }
-    
-    // Count braces to ensure they're balanced
-    let braceCount = 0;
-    let bracketCount = 0;
-    let inString = false;
-    let escaped = false;
-    
-    for (let i = 0; i < trimmed.length; i++) {
-      const char = trimmed[i];
-      
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      
-      if (char === '\\') {
-        escaped = true;
-        continue;
-      }
-      
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
-      
-      if (!inString) {
-        if (char === '{') braceCount++;
-        else if (char === '}') braceCount--;
-        else if (char === '[') bracketCount++;
-        else if (char === ']') bracketCount--;
-      }
-    }
-    
-    // Check if braces and brackets are balanced
-    if (braceCount !== 0) {
-      console.warn(`⚠️ Unbalanced braces: ${braceCount}`);
-      return false;
-    }
-    
-    if (bracketCount !== 0) {
-      console.warn(`⚠️ Unbalanced brackets: ${bracketCount}`);
-      return false;
-    }
-    
-    // Check for expected structure for predictions
-    if (!trimmed.includes('"predictions"') || !trimmed.includes('[')) {
-      console.warn(`⚠️ Missing expected predictions structure`);
-      return false;
-    }
-    
-    // Try to parse to ensure it's valid JSON
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (!parsed.predictions || !Array.isArray(parsed.predictions)) {
-        console.warn(`⚠️ Invalid predictions structure in JSON`);
-        return false;
-      }
-      
-      // Check if we have a reasonable number of predictions
-      if (parsed.predictions.length < 10) {
-        console.warn(`⚠️ Too few predictions: ${parsed.predictions.length}`);
-        return false;
-      }
-      
-      return true;
-    } catch (error) {
-      console.warn(`⚠️ JSON parse error during validation: ${error.message}`);
-      return false;
-    }
-  }
-
-  /**
-   * Extract partial predictions from a potentially truncated response
-   * @param {string} text - The response text (potentially truncated)
-   * @returns {Object|null} Extracted predictions object or null if none found
-   */
-  extractPartialPredictions(text) {
-    if (!text || text.trim().length === 0) {
-      return null;
-    }
-
-    try {
-      // First try to find a complete JSON structure
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        console.warn('⚠️ No JSON structure found in response');
-        return null;
-      }
-
-      let jsonText = jsonMatch[0];
-      
-      // Try parsing as-is first
-      try {
-        const parsed = JSON.parse(jsonText);
-        if (parsed.predictions && Array.isArray(parsed.predictions)) {
-          console.log(`✅ Successfully extracted ${parsed.predictions.length} complete predictions`);
-          return parsed;
-        }
-      } catch (parseError) {
-        console.log('📝 Initial JSON parse failed, attempting repair...');
-      }
-
-      // If parsing failed, try to repair truncated JSON
-      const repairedJson = this.repairTruncatedJson(jsonText);
-      if (repairedJson) {
-        try {
-          const parsed = JSON.parse(repairedJson);
-          if (parsed.predictions && Array.isArray(parsed.predictions) && parsed.predictions.length > 0) {
-            console.log(`✅ Successfully extracted ${parsed.predictions.length} predictions from repaired JSON`);
-            return parsed;
-          }
-        } catch (repairParseError) {
-          console.warn('⚠️ Failed to parse repaired JSON:', repairParseError.message);
-        }
-      }
-
-      // Last resort: try to extract individual prediction objects
-      const extractedPredictions = this.extractIndividualPredictions(text);
-      if (extractedPredictions && extractedPredictions.length > 0) {
-        console.log(`✅ Extracted ${extractedPredictions.length} individual predictions`);
-        return { predictions: extractedPredictions };
-      }
-
-      return null;
-    } catch (error) {
-      console.error('❌ Error extracting partial predictions:', error.message);
-      return null;
-    }
-  }
-
-  /**
-   * Attempt to repair truncated JSON by fixing common issues
-   * @param {string} jsonText - Potentially truncated JSON
-   * @returns {string|null} Repaired JSON or null if repair failed
-   */
-  repairTruncatedJson(jsonText) {
-    try {
-      let repaired = jsonText.trim();
-
-      // Remove any trailing incomplete elements
-      // Look for the last complete prediction object
-      const predictionMatches = [...repaired.matchAll(/\{[^{}]*"timestamp"[^{}]*"price"[^{}]*\}/g)];
-      if (predictionMatches.length === 0) {
-        return null;
-      }
-
-      // Find the position after the last complete prediction
-      const lastMatch = predictionMatches[predictionMatches.length - 1];
-      const lastCompletePos = lastMatch.index + lastMatch[0].length;
-
-      // Extract everything up to the last complete prediction
-      let truncatedAtLastComplete = repaired.substring(0, lastCompletePos);
-
-      // Check if we need to close the predictions array
-      if (!truncatedAtLastComplete.includes(']')) {
-        truncatedAtLastComplete += ']';
-      }
-
-      // Check if we need to close the main object
-      if (!truncatedAtLastComplete.endsWith('}')) {
-        truncatedAtLastComplete += '}';
-      }
-
-      // Validate the structure makes sense
-      if (truncatedAtLastComplete.includes('"predictions"') && 
-          truncatedAtLastComplete.includes('[') && 
-          truncatedAtLastComplete.includes(']')) {
-        return truncatedAtLastComplete;
-      }
-
-      return null;
-    } catch (error) {
-      console.warn('⚠️ Error repairing JSON:', error.message);
-      return null;
-    }
-  }
-
-  /**
-   * Extract individual prediction objects from text
-   * @param {string} text - Response text
-   * @returns {Array} Array of prediction objects
-   */
-  extractIndividualPredictions(text) {
-    try {
-      const predictions = [];
-      
-      // Look for individual prediction objects with timestamp and price
-      const predictionRegex = /\{[^{}]*"timestamp"[^{}]*"price"[^{}]*\}/g;
-      const matches = text.match(predictionRegex);
-      
-      if (!matches) {
-        return [];
-      }
-
-      for (const match of matches) {
-        try {
-          const prediction = JSON.parse(match);
-          if (prediction.timestamp && prediction.price && 
-              typeof prediction.timestamp === 'number' && 
-              typeof prediction.price === 'number' && 
-              prediction.price > 0) {
-            predictions.push(prediction);
-          }
-        } catch (parseError) {
-          // Skip invalid prediction objects
-          continue;
-        }
-      }
-
-      return predictions;
-    } catch (error) {
-      console.warn('⚠️ Error extracting individual predictions:', error.message);
-      return [];
-    }
   }
 
   /**

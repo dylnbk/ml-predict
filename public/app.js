@@ -531,8 +531,16 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
 // Fetch predictions for a symbol/interval
 async function fetchPredictions(symbol, interval) {
     try {
-        // Get the current AI provider (convert to lowercase)
-        const provider = currentAIModel.toLowerCase();
+        // Map internal model names to API provider names
+        const providerMapping = {
+            'GPT': 'gpt',
+            'GEMINI': 'gemini',
+            'CLAUDE': 'claude',
+            'ARIMA': 'arima',
+            'HOLT_WINTERS': 'holt_winters'
+        };
+        
+        const provider = providerMapping[currentAIModel] || currentAIModel.toLowerCase();
         const response = await fetch(`/api/predictions/${symbol}/${interval}?provider=${provider}`);
         if (response.ok) {
             const predictions = await response.json();
@@ -694,7 +702,16 @@ function setupModelControls() {
     const mobileModelSelect = document.getElementById('mobile-model-select'); // Keep for mobile
 
     const handleModelChange = (selectedValue) => {
-        const newModel = selectedValue.toUpperCase(); // GPT, GEMINI, CLAUDE
+        // Map display names to internal model names
+        const modelMapping = {
+            'gpt': 'GPT',
+            'gemini': 'GEMINI',
+            'claude': 'CLAUDE',
+            'arima': 'ARIMA',
+            'holt_winters': 'HOLT_WINTERS'
+        };
+        
+        const newModel = modelMapping[selectedValue] || selectedValue.toUpperCase();
         if (currentAIModel !== newModel) {
             currentAIModel = newModel;
             console.log(`AI Model changed to: ${currentAIModel}`);
