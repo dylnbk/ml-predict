@@ -803,6 +803,155 @@ app.post('/api/predictions/generate', async (req, res) => {
       message: error.message
     });
   }
+// Get reset history for a symbol/interval/provider
+app.get('/api/predictions/resets/:symbol/:interval', async (req, res) => {
+  const { symbol, interval } = req.params;
+  const { aiProvider, limit } = req.query;
+  
+  // Validate input
+  if (!symbol || !SYMBOLS.includes(symbol)) {
+    return res.status(400).json({
+      error: 'Invalid symbol',
+      message: 'Symbol must be one of: ' + SYMBOLS.join(', ')
+    });
+  }
+  
+  if (!interval || !Object.values(INTERVALS).includes(interval)) {
+    return res.status(400).json({
+      error: 'Invalid interval',
+      message: 'Interval must be one of: ' + Object.values(INTERVALS).join(', ')
+    });
+  }
+  
+  try {
+    const resetHistory = await predictionService.getResetHistory(
+      symbol, 
+      interval, 
+      aiProvider || null, 
+      parseInt(limit) || 10
+    );
+    
+    res.json({
+      success: true,
+      symbol,
+      interval,
+      aiProvider: aiProvider || 'all',
+      resets: resetHistory
+    });
+    
+  } catch (error) {
+    console.error('Error fetching reset history:', error);
+    res.status(500).json({
+      error: 'Failed to fetch reset history',
+      message: error.message
+    });
+  }
+});
+
+// Check reset condition for a symbol/interval/provider
+app.get('/api/predictions/reset-check/:symbol/:interval/:aiProvider', async (req, res) => {
+  const { symbol, interval, aiProvider } = req.params;
+  
+  // Validate input
+  if (!symbol || !SYMBOLS.includes(symbol)) {
+    return res.status(400).json({
+      error: 'Invalid symbol',
+      message: 'Symbol must be one of: ' + SYMBOLS.join(', ')
+    });
+  }
+  
+  if (!interval || !Object.values(INTERVALS).includes(interval)) {
+    return res.status(400).json({
+      error: 'Invalid interval',
+      message: 'Interval must be one of: ' + Object.values(INTERVALS).join(', ')
+    });
+  }
+  
+  const validProviders = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
+  if (!validProviders.includes(aiProvider)) {
+    return res.status(400).json({
+      error: 'Invalid AI provider',
+      message: 'AI provider must be one of: ' + validProviders.join(', ')
+    });
+  }
+  
+  try {
+    const resetCheck = await predictionService.checkResetCondition(symbol, interval, aiProvider);
+    
+    res.json({
+      success: true,
+      symbol,
+      interval,
+      aiProvider,
+      resetCheck
+    });
+    
+  } catch (error) {
+    console.error('Error checking reset condition:', error);
+    res.status(500).json({
+      error: 'Failed to check reset condition',
+      message: error.message
+    });
+  }
+});
+
+// Manually trigger reset for testing purposes
+app.post('/api/predictions/reset', async (req, res) => {
+  const { symbol, interval, aiProvider } = req.body;
+  
+  // Validate input
+  if (!symbol || !SYMBOLS.includes(symbol)) {
+    return res.status(400).json({
+      error: 'Invalid symbol',
+      message: 'Symbol must be one of: ' + SYMBOLS.join(', ')
+    });
+  }
+  
+  if (!interval || !Object.values(INTERVALS).includes(interval)) {
+    return res.status(400).json({
+      error: 'Invalid interval',
+      message: 'Interval must be one of: ' + Object.values(INTERVALS).join(', ')
+    });
+  }
+  
+  const validProviders = ['gemini', 'gpt', 'claude', 'arima', 'holt_winters'];
+  if (!aiProvider || !validProviders.includes(aiProvider)) {
+    return res.status(400).json({
+      error: 'Invalid AI provider',
+      message: 'AI provider must be one of: ' + validProviders.join(', ')
+    });
+  }
+  
+  try {
+    // First check if reset is needed
+    const resetCheck = await predictionService.checkResetCondition(symbol, interval, aiProvider);
+    
+    if (!resetCheck.needsReset) {
+      return res.status(400).json({
+        error: 'Reset not needed',
+        message: resetCheck.reason,
+        resetCheck
+      });
+    }
+    
+    // Execute the reset
+    const resetResult = await predictionService.executeReset(symbol, interval, aiProvider, resetCheck);
+    
+    res.json({
+      success: true,
+      message: `Reset executed for ${symbol} ${interval} ${aiProvider}`,
+      resetResult,
+      resetCheck
+    });
+    
+  } catch (error) {
+    console.error('Error executing manual reset:', error);
+    res.status(500).json({
+      error: 'Failed to execute reset',
+      message: error.message
+    });
+  }
+});
 });
 
 // Helper function to get latest indicators for predictions
@@ -825,7 +974,7 @@ async function generateHourlyPredictions() {
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {
       try {
-        const result = await predictionService.generatePredictions(symbol, '1h', provider);
+        const result = await predictionService.generateRollingPredictionsWithReset(symbol, '1h', provider);
         if (result.success) {
           console.log(`✅ Generated hourly predictions for ${symbol} using ${provider}`);
         } else {
@@ -855,7 +1004,7 @@ async function generate4HourlyPredictions() {
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {
       try {
-        const result = await predictionService.generatePredictions(symbol, '4h', provider);
+        const result = await predictionService.generateRollingPredictionsWithReset(symbol, '4h', provider);
         if (result.success) {
           console.log(`✅ Generated 4-hourly predictions for ${symbol} using ${provider}`);
         } else {
@@ -885,7 +1034,7 @@ async function generateDailyPredictions() {
   for (const symbol of SYMBOLS) {
     for (const provider of providers) {
       try {
-        const result = await predictionService.generatePredictions(symbol, '1d', provider);
+        const result = await predictionService.generateRollingPredictionsWithReset(symbol, '1d', provider);
         if (result.success) {
           console.log(`✅ Generated daily predictions for ${symbol} using ${provider}`);
         } else {

@@ -33,6 +33,9 @@ class PredictionService {
     
     // Initialize statistical models
     this.statisticalModels = new StatisticalModels();
+    
+    // Reset configuration
+    this.resetThreshold = 0.20; // 20% deviation threshold
   }
 
   /**
@@ -760,6 +763,245 @@ class PredictionService {
         }
       });
     });
+  }
+
+  /**
+   * Check if the most recent completed prediction requires a reset
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @returns {Promise<Object>} Reset check result
+   */
+  async checkResetCondition(symbol, interval, aiProvider) {
+    return new Promise((resolve, reject) => {
+      const query = `
+        SELECT id, target_time, predicted_price, actual_price
+        FROM predictions
+        WHERE symbol = ?
+          AND interval = ?
+          AND ai_provider = ?
+          AND actual_price IS NOT NULL
+        ORDER BY target_time DESC
+        LIMIT 1
+      `;
+
+      this.db.get(query, [symbol, interval, aiProvider], (err, row) => {
+        if (err) {
+          reject(err);
+        } else if (!row) {
+          resolve({ needsReset: false, reason: 'No completed predictions found' });
+        } else {
+          const deviation = Math.abs((row.predicted_price - row.actual_price) / row.actual_price) * 100;
+          const needsReset = deviation > (this.resetThreshold * 100);
+          
+          resolve({
+            needsReset,
+            deviation,
+            threshold: this.resetThreshold * 100,
+            predictionData: row,
+            reason: needsReset ? `Deviation ${deviation.toFixed(2)}% exceeds threshold ${(this.resetThreshold * 100).toFixed(2)}%` : 'Within acceptable range'
+          });
+        }
+      });
+    });
+  }
+
+  /**
+   * Execute prediction reset for a specific symbol/interval/provider
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @param {Object} resetData - Data about why reset is needed
+   * @returns {Promise<Object>} Reset execution result
+   */
+  async executeReset(symbol, interval, aiProvider, resetData) {
+    return new Promise((resolve, reject) => {
+      const currentTime = Date.now();
+      
+      // First count how many future predictions will be cleared
+      const countQuery = `
+        SELECT COUNT(*) as count
+        FROM predictions
+        WHERE symbol = ?
+          AND interval = ?
+          AND ai_provider = ?
+          AND target_time > ?
+      `;
+      
+      this.db.get(countQuery, [symbol, interval, aiProvider, currentTime], (err, countRow) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        
+        const predictionsToDelete = countRow.count;
+        
+        // Delete future predictions
+        const deleteQuery = `
+          DELETE FROM predictions
+          WHERE symbol = ?
+            AND interval = ?
+            AND ai_provider = ?
+            AND target_time > ?
+        `;
+        
+        this.db.run(deleteQuery, [symbol, interval, aiProvider, currentTime], (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          
+          // Record the reset event
+          const insertResetQuery = `
+            INSERT INTO prediction_resets
+            (symbol, interval, ai_provider, reset_time, reason, threshold_percentage,
+             actual_deviation, predicted_price, actual_price, target_time, predictions_cleared)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `;
+          
+          this.db.run(insertResetQuery, [
+            symbol,
+            interval,
+            aiProvider,
+            currentTime,
+            resetData.reason,
+            resetData.threshold,
+            resetData.deviation,
+            resetData.predictionData.predicted_price,
+            resetData.predictionData.actual_price,
+            resetData.predictionData.target_time,
+            predictionsToDelete
+          ], (resetErr) => {
+            if (resetErr) {
+              reject(resetErr);
+              return;
+            }
+            
+            console.log(`🔄 Reset executed for ${symbol} (${interval}) ${aiProvider}: cleared ${predictionsToDelete} future predictions`);
+            resolve({
+              success: true,
+              predictionsCleared: predictionsToDelete,
+              resetId: this.lastID
+            });
+          });
+        });
+      });
+    });
+  }
+
+  /**
+   * Get reset history for a symbol/interval/provider
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider (optional)
+   * @param {number} limit - Number of records to return (default: 10)
+   * @returns {Promise<Array>} Reset history
+   */
+  async getResetHistory(symbol, interval, aiProvider = null, limit = 10) {
+    return new Promise((resolve, reject) => {
+      let query = `
+        SELECT *
+        FROM prediction_resets
+        WHERE symbol = ? AND interval = ?
+      `;
+      const params = [symbol, interval];
+      
+      if (aiProvider) {
+        query += ` AND ai_provider = ?`;
+        params.push(aiProvider);
+      }
+      
+      query += ` ORDER BY reset_time DESC LIMIT ?`;
+      params.push(limit);
+      
+      this.db.all(query, params, (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows || []);
+        }
+      });
+    });
+  }
+
+  /**
+   * Enhanced rolling predictions with reset checking
+   * @param {string} symbol - Cryptocurrency symbol
+   * @param {string} interval - Time interval
+   * @param {string} aiProvider - AI provider
+   * @param {number} maxRetries - Maximum retries
+   * @returns {Promise<Object>} Rolling prediction result with reset info
+   */
+  async generateRollingPredictionsWithReset(symbol, interval, aiProvider = 'gemini', maxRetries = 3) {
+    try {
+      console.log(`🔄 Checking rolling predictions with reset detection for ${symbol} (${interval}) using ${aiProvider.toUpperCase()}...`);
+
+      // First check if reset is needed
+      const resetCheck = await this.checkResetCondition(symbol, interval, aiProvider);
+      let resetExecuted = false;
+      let resetData = null;
+
+      if (resetCheck.needsReset) {
+        console.log(`⚠️ Reset condition detected for ${symbol} (${interval}) ${aiProvider}: ${resetCheck.reason}`);
+        
+        const resetResult = await this.executeReset(symbol, interval, aiProvider, resetCheck);
+        if (resetResult.success) {
+          resetExecuted = true;
+          resetData = resetResult;
+          console.log(`✅ Reset completed: cleared ${resetResult.predictionsCleared} future predictions`);
+        }
+      }
+
+      // Now proceed with rolling prediction generation
+      const existingCount = await this.countFuturePredictions(symbol, interval, aiProvider);
+      const predictionsNeeded = Math.max(0, 24 - existingCount);
+
+      console.log(`📊 Found ${existingCount} existing future predictions, need ${predictionsNeeded} more`);
+
+      if (predictionsNeeded === 0 && !resetExecuted) {
+        console.log(`✅ Already have 24 future predictions for ${symbol} (${interval}), no rolling needed`);
+        return {
+          success: true,
+          symbol,
+          interval,
+          aiProvider,
+          predictionsNeeded: 0,
+          generated: 0,
+          resetExecuted: false,
+          message: 'No new predictions needed'
+        };
+      }
+
+      let generationResult = { success: true, actualCount: 0 };
+      
+      if (predictionsNeeded > 0) {
+        generationResult = await this.generatePredictions(symbol, interval, aiProvider, maxRetries, predictionsNeeded);
+      }
+      
+      if (generationResult.success) {
+        console.log(`✅ Rolling predictions completed for ${symbol} (${interval}): generated ${predictionsNeeded} new predictions${resetExecuted ? ' (after reset)' : ''}`);
+      }
+
+      return {
+        ...generationResult,
+        predictionsNeeded,
+        generated: generationResult.success ? predictionsNeeded : 0,
+        resetExecuted,
+        resetData,
+        resetCheck
+      };
+
+    } catch (error) {
+      console.error(`❌ Error in rolling predictions with reset for ${symbol} (${interval}):`, error.message);
+      return {
+        success: false,
+        error: error.message,
+        symbol,
+        interval,
+        aiProvider,
+        resetExecuted: false
+      };
+    }
   }
 
   /**
