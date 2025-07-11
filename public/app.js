@@ -51,6 +51,22 @@ const chartOptions = {
                     const numericValue = (typeof value === 'number' && !isNaN(value)) ? value : 0;
                     const formattedValue = '$' + numericValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+                    // Handle reset event markers
+                    if (datasetLabel === 'Reset Events') {
+                        const resetEvents = context.dataset.resetEvents;
+                        if (resetEvents && resetEvents[context.dataIndex]) {
+                            const reset = resetEvents[context.dataIndex];
+                            return [
+                                `🔴 PREDICTION RESET`,
+                                `Price: ${formattedValue}`,
+                                `Reason: ${reset.reason || 'High deviation'}`,
+                                `Deviation: ${reset.deviation_amount ? reset.deviation_amount.toFixed(1) + '%' : 'N/A'}`,
+                                `Predictions cleared: ${reset.predictions_cleared || 0}`
+                            ];
+                        }
+                        return `Reset Event: ${formattedValue}`;
+                    }
+
                     if (datasetLabel.endsWith(' Past Predictions')) {
                         return `Past Pred: ${formattedValue}`;
                     } else if (datasetLabel.endsWith(' Future Predictions')) {
@@ -58,6 +74,13 @@ const chartOptions = {
                     } else { // Actual data series (e.g., 'BTC', 'ETH')
                         return `Actual: ${formattedValue}`;
                     }
+                },
+                title: function(context) {
+                    // For reset events, show a more descriptive title
+                    if (context.length > 0 && context[0].dataset.label === 'Reset Events') {
+                        return 'Prediction Reset Event';
+                    }
+                    return context[0]?.label || '';
                 }
             }
         },
@@ -161,6 +184,7 @@ let currentView = 'chart';
 let allCryptoData = {}; // Store data for all cryptocurrencies
 let allPredictions = {}; // Store predictions for all cryptocurrencies
 let allAccuracyMetrics = {}; // Store accuracy metrics for all cryptocurrencies
+let allResets = {}; // Store reset data for all cryptocurrencies
 
 // WebSocket connection
 let ws = null;
@@ -362,8 +386,9 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
         // Store full data for table view and fullscreen charts
         allCryptoData[symbol] = data;
         
-        // Fetch predictions for the current AI model
+        // Fetch predictions and reset data for the current AI model
         const predictions = await fetchPredictions(symbol, interval);
+        const resets = await fetchResets(symbol, interval);
         
         // For grid charts, limit to last 150 data points
         // For fullscreen charts, use all available data
@@ -501,6 +526,58 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
             }
         ];
         
+        // Add reset markers if any exist
+        if (resets && resets.length > 0) {
+            // Filter resets to only show those within the chart time range
+            const chartStartTime = chartData.length > 0 ? chartData[0].open_time : 0;
+            const chartEndTime = chartData.length > 0 ? chartData[chartData.length - 1].open_time : Date.now();
+            
+            const relevantResets = resets.filter(reset =>
+                reset.timestamp >= chartStartTime && reset.timestamp <= chartEndTime + (24 * 60 * 60 * 1000) // Include future resets within 24h
+            );
+            
+            // Create reset marker dataset as scatter points
+            if (relevantResets.length > 0) {
+                const resetData = relevantResets.map(reset => {
+                    // Find the corresponding price at the reset timestamp
+                    const resetTime = reset.timestamp;
+                    let resetPrice = null;
+                    
+                    // Try to find exact match first
+                    const exactMatch = chartData.find(d => d.open_time === resetTime);
+                    if (exactMatch) {
+                        resetPrice = exactMatch.close;
+                    } else {
+                        // Find the closest data point
+                        const closest = chartData.reduce((prev, curr) =>
+                            Math.abs(curr.open_time - resetTime) < Math.abs(prev.open_time - resetTime) ? curr : prev
+                        );
+                        resetPrice = closest ? closest.close : prices[Math.floor(prices.length / 2)]; // fallback to middle price
+                    }
+                    
+                    return {
+                        x: formatTime(resetTime, interval),
+                        y: resetPrice
+                    };
+                });
+                
+                charts[symbol].data.datasets.push({
+                    label: 'Reset Events',
+                    type: 'scatter',
+                    data: resetData,
+                    backgroundColor: '#FF0000',
+                    borderColor: '#FF0000',
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    pointBorderWidth: 2,
+                    pointBorderColor: '#FFFFFF',
+                    showLine: false,
+                    order: 0, // Render on top
+                    resetEvents: relevantResets // Store reset data for tooltips
+                });
+            }
+        }
+        
         // Update labels to include future predictions
         if (futurePredictionLabels.length > 0) {
             charts[symbol].data.labels = labels.concat(futurePredictionLabels);
@@ -531,8 +608,16 @@ async function updateChart(symbol, interval, animate = true, isFullscreen = fals
 // Fetch predictions for a symbol/interval
 async function fetchPredictions(symbol, interval) {
     try {
-        // Get the current AI provider (convert to lowercase)
-        const provider = currentAIModel.toLowerCase();
+        // Map internal model names to API provider names
+        const providerMapping = {
+            'GPT': 'gpt',
+            'GEMINI': 'gemini',
+            'CLAUDE': 'claude',
+            'ARIMA': 'arima',
+            'HW': 'holt_winters'
+        };
+        
+        const provider = providerMapping[currentAIModel] || currentAIModel.toLowerCase();
         const response = await fetch(`/api/predictions/${symbol}/${interval}?provider=${provider}`);
         if (response.ok) {
             const predictions = await response.json();
@@ -562,6 +647,34 @@ async function fetchAccuracyMetrics(symbol, interval) {
         console.error(`Error fetching accuracy metrics for ${symbol}/${interval}:`, error);
     }
     return null;
+}
+
+// Fetch reset data for a symbol/interval
+async function fetchResets(symbol, interval) {
+    try {
+        // Map internal model names to API provider names for optional filtering
+        const providerMapping = {
+            'GPT': 'gpt',
+            'GEMINI': 'gemini',
+            'CLAUDE': 'claude',
+            'ARIMA': 'arima',
+            'HW': 'holt_winters'
+        };
+        
+        const provider = providerMapping[currentAIModel] || currentAIModel.toLowerCase();
+        const response = await fetch(`/api/predictions/resets/${symbol}/${interval}?aiProvider=${provider}`);
+        if (response.ok) {
+            const data = await response.json();
+            const resets = data.resets || [];
+            // Store resets indexed by symbol-interval-provider
+            const key = `${symbol}-${interval}-${provider}`;
+            allResets[key] = resets;
+            return resets;
+        }
+    } catch (error) {
+        console.error(`Error fetching resets for ${symbol}/${interval} with ${currentAIModel}:`, error);
+    }
+    return [];
 }
 
 // Update all charts with loading state
@@ -694,7 +807,16 @@ function setupModelControls() {
     const mobileModelSelect = document.getElementById('mobile-model-select'); // Keep for mobile
 
     const handleModelChange = (selectedValue) => {
-        const newModel = selectedValue.toUpperCase(); // GPT, GEMINI, CLAUDE
+        // Map display names to internal model names
+        const modelMapping = {
+            'gpt': 'GPT',
+            'gemini': 'GEMINI',
+            'claude': 'CLAUDE',
+            'arima': 'ARIMA',
+            'holt_winters': 'HW'
+        };
+        
+        const newModel = modelMapping[selectedValue] || selectedValue.toUpperCase();
         if (currentAIModel !== newModel) {
             currentAIModel = newModel;
             console.log(`AI Model changed to: ${currentAIModel}`);
@@ -971,9 +1093,18 @@ async function updateTableView() {
         const data = allCryptoData[symbol];
         if (!data || data.length === 0) return;
         
-        // Fetch predictions and accuracy for this symbol
+        // Fetch predictions, accuracy, and reset data for this symbol
         const predictions = await fetchPredictions(symbol, currentInterval);
         const accuracyMetrics = await fetchAccuracyMetrics(symbol, currentInterval);
+        const resets = await fetchResets(symbol, currentInterval);
+        
+        // Create a map of reset timestamps for easy lookup
+        const resetMap = {};
+        if (resets && resets.length > 0) {
+            resets.forEach(reset => {
+                resetMap[reset.timestamp] = reset;
+            });
+        }
         
         // Update table price
         const prices = data.map(k => k.close);
@@ -1081,6 +1212,20 @@ async function updateTableView() {
                 <td>${accuracyHtml}</td>
             `;
             
+            // Check if this row corresponds to a reset event
+            const reset = resetMap[rowData.timestamp];
+            if (reset) {
+                row.classList.add('reset-row');
+                row.title = `🔴 RESET: ${reset.reason || 'High deviation'} (${reset.deviation_amount ? reset.deviation_amount.toFixed(1) + '%' : 'N/A'} deviation)`;
+                
+                // Add reset indicator to the first cell
+                const firstCell = row.querySelector('td:first-child');
+                if (firstCell) {
+                    firstCell.innerHTML = `🔴 ${dateStr}`;
+                    firstCell.classList.add('reset-cell');
+                }
+            }
+            
             tableBody.appendChild(row);
         });
         
@@ -1170,8 +1315,9 @@ function setupFullscreenFeature() {
         const labels = data.map(k => formatTimeFullscreen(k.open_time, currentInterval));
         const prices = data.map(k => k.close);
         
-        // Fetch predictions for the current AI model
+        // Fetch predictions and reset data for the current AI model
         const predictions = await fetchPredictions(symbol, currentInterval);
+        const resets = await fetchResets(symbol, currentInterval);
                 
         // Prepare prediction data
         let pastPredictionLabels = [];
@@ -1208,64 +1354,112 @@ function setupFullscreenFeature() {
         predictionAreaGradient.addColorStop(0, `${baseColor}08`); // 5% opacity
         predictionAreaGradient.addColorStop(1, `${baseColor}00`); // 0% opacity
         
+        // Prepare datasets array
+        const datasets = [
+            // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
+            {
+                label: 'actual',
+                data: prices,
+                borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 3,
+                pointRadius: 0,
+                tension: 0.2
+            },
+            // Past predictions - WITH AREA FILL
+            {
+                label: 'pred:past',
+                data: pastPredictionData.length > 0 ?
+                    labels.map(label => {
+                        const idx = pastPredictionLabels.indexOf(label);
+                        return idx !== -1 ? pastPredictionData[idx] : null;
+                    }) : [],
+                borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
+                backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
+                fill: true,
+                borderWidth: 1.5, // Slightly thinner line
+                borderDash: [], // Solid line
+                pointRadius: 2,
+                pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderColor: 'rgba(255, 255, 255, 0.4)',
+                pointBorderWidth: 1,
+                pointHoverRadius: 6,
+                tension: 0.2,
+                spanGaps: true
+            },
+            // Future predictions - DOTTED LINE NO AREA FILL
+            {
+                label: 'pred:future',
+                data: labels.concat(futurePredictionLabels).map((label, idx) => {
+                    if (idx === labels.length - 1) {
+                        // Connect to last actual price
+                        return prices[prices.length - 1];
+                    } else if (idx >= labels.length) {
+                        const predIdx = futurePredictionLabels.indexOf(label);
+                        return predIdx !== -1 ? futurePredictionData[predIdx] : null;
+                    }
+                    return null;
+                }),
+                borderColor: predictionLineGradient,
+                backgroundColor: 'transparent',
+                fill: false,
+                borderWidth: 3,
+                borderDash: [4, 6],
+                pointRadius: 0,
+                tension: 0.2,
+                spanGaps: true
+            }
+        ];
+        
+        // Add reset markers if any exist (for fullscreen)
+        if (resets && resets.length > 0) {
+            const relevantResets = resets.filter(reset =>
+                reset.timestamp >= (data.length > 0 ? data[0].open_time : 0) &&
+                reset.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : Date.now()) + (24 * 60 * 60 * 1000)
+            );
+            
+            if (relevantResets.length > 0) {
+                const resetData = relevantResets.map(reset => {
+                    const resetTime = reset.timestamp;
+                    let resetPrice = null;
+                    
+                    const exactMatch = data.find(d => d.open_time === resetTime);
+                    if (exactMatch) {
+                        resetPrice = exactMatch.close;
+                    } else {
+                        const closest = data.reduce((prev, curr) =>
+                            Math.abs(curr.open_time - resetTime) < Math.abs(prev.open_time - resetTime) ? curr : prev
+                        );
+                        resetPrice = closest ? closest.close : prices[Math.floor(prices.length / 2)];
+                    }
+                    
+                    return {
+                        x: formatTimeFullscreen(resetTime, currentInterval),
+                        y: resetPrice
+                    };
+                });
+                
+                datasets.push({
+                    label: 'Reset Events',
+                    type: 'scatter',
+                    data: resetData,
+                    backgroundColor: '#FF0000',
+                    borderColor: '#FF0000',
+                    pointRadius: 8,
+                    pointHoverRadius: 10,
+                    pointBorderWidth: 3,
+                    pointBorderColor: '#FFFFFF',
+                    showLine: false,
+                    order: 0,
+                    resetEvents: relevantResets
+                });
+            }
+        }
+        
         const chartData = {
             labels: futurePredictionLabels.length > 0 ? labels.concat(futurePredictionLabels) : labels,
-            datasets: [
-                // Actual price data (main dataset) - SOLID GRADIENT LINE WITH AREA FILL
-                {
-                    label: 'actual',
-                    data: prices,
-                    borderColor: createLineGradient(ctx, symbol, fullscreenCanvas.height),
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    borderWidth: 3,
-                    pointRadius: 0,
-                    tension: 0.2
-                },
-                // Past predictions - WITH AREA FILL
-                {
-                    label: 'pred:past',
-                    data: pastPredictionData.length > 0 ?
-                        labels.map(label => {
-                            const idx = pastPredictionLabels.indexOf(label);
-                            return idx !== -1 ? pastPredictionData[idx] : null;
-                        }) : [],
-                    borderColor: 'rgba(255, 255, 255, 0.8)', // More subtle white line for past predictions
-                    backgroundColor: 'rgba(255, 255, 255, 0.05)', // Very subtle white fill for past predictions
-                    fill: true,
-                    borderWidth: 1.5, // Slightly thinner line
-                    borderDash: [], // Solid line
-                    pointRadius: 2,
-                    pointBackgroundColor: 'rgba(255, 255, 255, 0.4)',
-                    pointBorderColor: 'rgba(255, 255, 255, 0.4)',
-                    pointBorderWidth: 1,
-                    pointHoverRadius: 6,
-                    tension: 0.2,
-                    spanGaps: true
-                },
-                // Future predictions - DOTTED LINE NO AREA FILL
-                {
-                    label: 'pred:future',
-                    data: labels.concat(futurePredictionLabels).map((label, idx) => {
-                        if (idx === labels.length - 1) {
-                            // Connect to last actual price
-                            return prices[prices.length - 1];
-                        } else if (idx >= labels.length) {
-                            const predIdx = futurePredictionLabels.indexOf(label);
-                            return predIdx !== -1 ? futurePredictionData[predIdx] : null;
-                        }
-                        return null;
-                    }),
-                    borderColor: predictionLineGradient,
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    borderWidth: 3,
-                    borderDash: [4, 6],
-                    pointRadius: 0,
-                    tension: 0.2,
-                    spanGaps: true
-                }
-            ]
+            datasets: datasets
         };
         
         // Enhanced options for fullscreen
@@ -1432,15 +1626,24 @@ function setupFullscreenFeature() {
         if (allCryptoData[symbol]) {
             const data = allCryptoData[symbol];
             
-            // Fetch predictions for fullscreen view
+            // Fetch predictions, accuracy, and reset data for fullscreen view
             const predictions = await fetchPredictions(symbol, currentInterval);
             const accuracyMetrics = await fetchAccuracyMetrics(symbol, currentInterval);
+            const resets = await fetchResets(symbol, currentInterval);
             
             // Create prediction map
             const predictionMap = {};
             if (predictions && predictions.length > 0) {
                 predictions.forEach(pred => {
                     predictionMap[pred.timestamp] = pred;
+                });
+            }
+            
+            // Create a map of reset timestamps for easy lookup
+            const resetMap = {};
+            if (resets && resets.length > 0) {
+                resets.forEach(reset => {
+                    resetMap[reset.timestamp] = reset;
                 });
             }
             
@@ -1516,9 +1719,15 @@ function setupFullscreenFeature() {
                     accuracyHtml = '-';
                 }
                 
+                // Check if this row corresponds to a reset event
+                const reset = resetMap[rowData.timestamp];
+                const resetClass = reset ? ' class="reset-row"' : '';
+                const resetTitle = reset ? ` title="🔴 RESET: ${reset.reason || 'High deviation'} (${reset.deviation_amount ? reset.deviation_amount.toFixed(1) + '%' : 'N/A'} deviation)"` : '';
+                const resetIndicator = reset ? '🔴 ' : '';
+                
                 tableHTML += `
-                    <tr>
-                        <td>${dateStr}</td>
+                    <tr${resetClass}${resetTitle}>
+                        <td${reset ? ' class="reset-cell"' : ''}>${resetIndicator}${dateStr}</td>
                         <td>${closePriceHtml}</td>
                         <td>${predictionHtml}</td>
                         <td>${accuracyHtml}</td>
@@ -1619,8 +1828,9 @@ async function updateFullscreenChart(symbol, interval) {
         
         if (data.length === 0) return;
         
-        // Fetch predictions for the current AI model
+        // Fetch predictions and reset data for the current AI model
         const predictions = await fetchPredictions(symbol, interval);
+        const resets = await fetchResets(symbol, interval);
         
         const labels = data.map(k => formatTimeFullscreen(k.open_time, interval));
         const prices = data.map(k => k.close);
@@ -1745,6 +1955,51 @@ async function updateFullscreenChart(symbol, interval) {
                 spanGaps: true
             }
         ];
+        
+        // Add reset markers if any exist (for fullscreen update)
+        if (resets && resets.length > 0) {
+            const relevantResets = resets.filter(reset =>
+                reset.timestamp >= (data.length > 0 ? data[0].open_time : 0) &&
+                reset.timestamp <= (data.length > 0 ? data[data.length - 1].open_time : Date.now()) + (24 * 60 * 60 * 1000)
+            );
+            
+            if (relevantResets.length > 0) {
+                const resetData = relevantResets.map(reset => {
+                    const resetTime = reset.timestamp;
+                    let resetPrice = null;
+                    
+                    const exactMatch = data.find(d => d.open_time === resetTime);
+                    if (exactMatch) {
+                        resetPrice = exactMatch.close;
+                    } else {
+                        const closest = data.reduce((prev, curr) =>
+                            Math.abs(curr.open_time - resetTime) < Math.abs(prev.open_time - resetTime) ? curr : prev
+                        );
+                        resetPrice = closest ? closest.close : prices[Math.floor(prices.length / 2)];
+                    }
+                    
+                    return {
+                        x: formatTimeFullscreen(resetTime, interval),
+                        y: resetPrice
+                    };
+                });
+                
+                fullscreenChart.data.datasets.push({
+                    label: 'Reset Events',
+                    type: 'scatter',
+                    data: resetData,
+                    backgroundColor: '#FF0000',
+                    borderColor: '#FF0000',
+                    pointRadius: 8,
+                    pointHoverRadius: 10,
+                    pointBorderWidth: 3,
+                    pointBorderColor: '#FFFFFF',
+                    showLine: false,
+                    order: 0,
+                    resetEvents: relevantResets
+                });
+            }
+        }
         
         // Update labels to include future predictions
         if (futurePredictionLabels.length > 0) {

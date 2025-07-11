@@ -4,6 +4,20 @@
     box-sizing: border-box;
 }
 
+/* Hide main page scrollbar on desktop only */
+@media (min-width: 769px) {
+    html {
+        overflow-y: auto;
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+
+    /* Hide scrollbar for Chrome, Safari and Opera */
+    html::-webkit-scrollbar {
+        display: none;
+    }
+}
+
 /* Chart prediction styles */
 .chart-container {
     position: relative;
@@ -98,6 +112,42 @@ canvas {
 /* Price down (negative change) */
 .price-change.price-down {
     color: #ff4444;
+}
+
+/* Reset row styling */
+.reset-row {
+    background-color: rgba(255, 0, 0, 0.1) !important;
+    border-left: 3px solid #ff0000 !important;
+}
+
+.reset-row:hover {
+    background-color: rgba(255, 0, 0, 0.15) !important;
+}
+
+.reset-cell {
+    color: #ff0000 !important;
+    font-weight: 600 !important;
+}
+
+/* Reset marker tooltip enhancement */
+.reset-row[title] {
+    cursor: help;
+}
+
+/* Reset indicators for fullscreen tables */
+.fullscreen-table .reset-row {
+    background-color: rgba(255, 0, 0, 0.08) !important;
+    border-left: 4px solid #ff0000 !important;
+}
+
+.fullscreen-table .reset-row:hover {
+    background-color: rgba(255, 0, 0, 0.12) !important;
+}
+
+.fullscreen-table .reset-cell {
+    color: #ff0000 !important;
+    font-weight: 700 !important;
+    font-size: 1.05em;
 }
 
 /* Ensure price change is visible in all views */
@@ -714,6 +764,24 @@ body {
         flex-direction: column;
     }
     
+    /* Ensure mobile views can scroll - more targeted approach */
+    .dashboard-grid {
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
+    }
+    
+    /* Simple fix: Make table-view and sentiment-view containers behave like dashboard-grid */
+    .table-view,
+    .sentiment-view {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+    }
+    
     .container {
         height: 100vh;
         display: flex;
@@ -1267,14 +1335,16 @@ body.fullscreen-active {
         background-color: transparent;
         overflow-y: auto;
         overflow-x: hidden;
+        /* Smooth scrolling on mobile */
         -webkit-overflow-scrolling: touch;
         padding: 10px;
         padding-bottom: 10px;
+        /* Remove max-height to allow full viewport usage */
         height: 100%;
     }
     
     .table-container {
-        max-height: calc(100% - 60px);
+        /* Remove max-height constraint */
         padding: 0;
     }
 }
@@ -1601,9 +1671,11 @@ body.fullscreen-active {
         background-color: transparent;
         overflow-y: auto;
         overflow-x: hidden;
+        /* Smooth scrolling on mobile */
         -webkit-overflow-scrolling: touch;
         padding: 10px;
         padding-bottom: 10px;
+        /* Remove max-height to allow full viewport usage */
         height: 100%;
     }
     
